@@ -24,7 +24,7 @@ dependencies = [
     "MetaTrader5==5.0.6180 ; sys_platform == 'win32'",
     "PySide6==6.11.2",
     "pandas==3.0.6",
-    "numpy==2.4.2",
+    "numpy==2.4.6",
     "lightgbm==4.7.0",
     "scikit-learn==1.9.1",
     "shap==0.48.0",
