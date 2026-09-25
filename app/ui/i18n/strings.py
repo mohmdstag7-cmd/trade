@@ -64,6 +64,18 @@ EN: dict[str, str] = {
     "settings.python": "Python",
     # window
     "window.quit.confirm": "Quit the application?",
+    # logs page (Phase 2)
+    "logs.filter.level": "Level",
+    "logs.filter.category": "Category",
+    "logs.filter.all": "All",
+    "logs.search": "Search in logs…",
+    "logs.autorefresh": "Live",
+    "logs.refresh": "Refresh",
+    "logs.open_folder": "Open folder",
+    "logs.empty": "No log entries match the current filters.",
+    # crash dialog (Phase 2)
+    "crash.title": "Something went wrong",
+    "crash.body": "An unexpected error occurred. A crash report was saved to:\n{path}\n\nYou can keep working. If it keeps happening, send the crash_reports folder with your next bug report.",
 }
 
 FA: dict[str, str] = {
@@ -115,6 +127,16 @@ FA: dict[str, str] = {
     "settings.version": "نسخه",
     "settings.python": "پایتون",
     "window.quit.confirm": "از برنامه خارج می‌شوید؟",
+    "logs.filter.level": "سطح",
+    "logs.filter.category": "دسته",
+    "logs.filter.all": "همه",
+    "logs.search": "جستجو در لاگ‌ها…",
+    "logs.autorefresh": "زنده",
+    "logs.refresh": "بازخوانی",
+    "logs.open_folder": "بازکردن پوشه",
+    "logs.empty": "هیچ لاگی با فیلترهای فعلی پیدا نشد.",
+    "crash.title": "مشکلی پیش آمد",
+    "crash.body": "یک خطای غیرمنتظره رخ داد. گزارش خطا در این مسیر ذخیره شد:\n{path}\n\nمی‌توانید به کار ادامه دهید. اگر تکرار شد، پوشهٔ crash_reports را همراه گزارش مشکل ارسال کنید.",
 }
 
 #: All string dictionaries, keyed by language code.
