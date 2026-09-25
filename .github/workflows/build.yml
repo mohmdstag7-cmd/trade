@@ -42,7 +42,7 @@ jobs:
           Compress-Archive -Path dist\MT5TradingWorkstation -DestinationPath MT5TradingWorkstation-portable.zip
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: MT5TradingWorkstation-${{ github.event.pull_request.number || github.ref_name }}
           path: MT5TradingWorkstation-portable.zip
