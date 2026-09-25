@@ -1,0 +1,49 @@
+name: Build
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: PyInstaller build (windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11 x64
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: "x64"
+          cache: "pip"
+          cache-dependency-path: "pyproject.toml"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Build with PyInstaller (one-folder)
+        run: pyinstaller installer/app.spec --noconfirm --clean
+
+      - name: Self-check the built exe (imports MetaTrader5)
+        run: |
+          dist\MT5TradingWorkstation\MT5TradingWorkstation.exe --self-check
+          dist\MT5TradingWorkstation\MT5TradingWorkstation.exe --version
+
+      - name: Zip portable build
+        run: |
+          Compress-Archive -Path dist\MT5TradingWorkstation -DestinationPath MT5TradingWorkstation-portable.zip
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MT5TradingWorkstation-${{ github.event.pull_request.number || github.ref_name }}
+          path: MT5TradingWorkstation-portable.zip
+          retention-days: 30

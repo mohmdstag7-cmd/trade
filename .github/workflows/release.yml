@@ -1,0 +1,78 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and attach release artifacts
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11 x64
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: "x64"
+          cache: "pip"
+          cache-dependency-path: "pyproject.toml"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: pytest
+
+      - name: Build with PyInstaller (one-folder)
+        run: pyinstaller installer/app.spec --noconfirm --clean
+
+      - name: Self-check the built exe (imports MetaTrader5)
+        run: |
+          dist\MT5TradingWorkstation\MT5TradingWorkstation.exe --self-check
+
+      - name: Zip portable build
+        run: |
+          Compress-Archive -Path dist\MT5TradingWorkstation -DestinationPath MT5TradingWorkstation-portable.zip
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer with Inno Setup
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart("v")
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DAppVersion=$version installer\innosetup.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Compute SHA-256 checksums
+        shell: pwsh
+        run: |
+          $files = @(
+            "dist\installer\MT5TradingWorkstation-Setup-$($env:GITHUB_REF_NAME.TrimStart('v')).exe",
+            "MT5TradingWorkstation-portable.zip"
+          )
+          $hashLines = foreach ($file in $files) {
+            $hash = (Get-FileHash -Algorithm SHA256 $file).Hash
+            "$hash  $(Split-Path -Leaf $file)"
+          }
+          $hashLines | Set-Content -Encoding utf8 checksums.txt
+          Get-Content checksums.txt
+
+      - name: Attach artifacts to the GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/installer/MT5TradingWorkstation-Setup-*.exe
+            MT5TradingWorkstation-portable.zip
+            checksums.txt
+          generate_release_notes: true
