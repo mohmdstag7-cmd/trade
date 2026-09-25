@@ -1,0 +1,67 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+wheels/
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+
+# --- Tooling caches ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+.cache/
+
+# --- App runtime artifacts (never commit) ---
+logs/
+crash_reports/
+data/
+*.sqlite
+*.sqlite3
+*.db
+*.sqlite-wal
+*.sqlite-shm
+model_registry/
+backups/
+
+# --- Secrets / environment ---
+.env
+.env.*
+*.key
+*.pem
+credentials*.json
+secrets*.json
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*~
+
+# --- Installers build output ---
+dist/installer/
+installer/Output/
+*.exe
+*.msi
+!installer/**
+
+# --- PyInstaller ---
+*.manifest
+*.spec.bak
+
+# --- Logs / temp ---
+*.log
+*.tmp
