@@ -83,6 +83,8 @@ known-first-party = ["app"]
 # Persian UI strings intentionally contain Arabic-script letters (RUF001 flags
 # them as "ambiguous" versus look-alike Latin letters).
 "app/ui/i18n/strings.py" = ["RUF001"]
+# Friendly Persian messages in the MT5 error taxonomy share the same property.
+"app/mt5/errors.py" = ["RUF001"]
 
 [tool.ruff.format]
 quote-style = "double"
