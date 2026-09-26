@@ -3,7 +3,7 @@
 > Updated at the end of every phase (SPEC A5). Decisions are recorded ADR-style:
 > **decision + reason**. For the full product specification see `docs/SPEC.md`.
 
-## Current state: Phase 3 (MT5 Gateway)
+## Current state: Phase 4 (Storage)
 
 ```
 ┌────────────────────────────────────────────────────────────┐
@@ -22,8 +22,13 @@
 │  gateway (1 thread + queue) ─ errors ─ credentials ─        │
 │  symbols (suffix resolve) ─ diagnostics ─ demo trade test   │
 ├────────────────────────────────────────────────────────────┤
-│  Storage (Phase 4) · Engine (6-8)                           │
-│  Analysis (5) · ML (10) · Backtest (9) · Analytics (11)     │
+│                  Storage (Phase 4)                          │
+│  db (WAL, per-thread conns) ─ migrations (idempotent) ─     │
+│  repositories (outbox in same tx) ─ outbox worker ─         │
+│  Supabase mirror ─ audit ─ backups ─ retention ─ log sink   │
+├────────────────────────────────────────────────────────────┤
+│  Engine (6-8) · Analysis (5) · ML (10) · Backtest (9)       │
+│  Analytics (11)                                             │
 └────────────────────────────────────────────────────────────┘
 ```
 
@@ -151,6 +156,41 @@ crash reports (SPEC C11, I-6); masking at the source plus storage outside
 the filesystem makes the leak paths structurally impossible rather than
 policy-enforced.
 
+### ADR-0012 — Transactional outbox behind a background mirror (Phase 4)
+**Decision:** Every mirrored insert writes the business row AND its outbox
+entry inside ONE SQLite transaction. A single `OutboxWorker` thread claims
+due batches (pending → in_flight), upserts them to Supabase by the row's
+UUID (`on_conflict=id`), and either acknowledges (`synced`), reschedules
+with exponential backoff (5 s → 1 h, max 10 attempts → `dead`), or enters a
+global 15-minute cooldown when the cloud reports auth/server trouble
+(paused free-tier project). Startup re-queues leftover in-flight rows.
+**Reason:** Offline-first with no data loss and duplicate-free sync is the
+G3-4 acceptance; the atomic pair (row + queue entry) makes "written but
+never queued" structurally impossible, and upsert-by-UUID makes replays
+idempotent on the cloud side.
+
+### ADR-0013 — Local SQLite is the source of truth, Supabase is a mirror (Phase 4)
+**Decision:** WAL mode, `synchronous=NORMAL`, foreign keys on, busy-timeout
+5 s, per-thread connections (threading.local). M001 creates the complete
+SPEC E2 table set (uuid TEXT PKs, UTC ISO-8601 stamps, time/symbol/strategy
+indexes) plus the outbox. Daily online snapshots (`Connection.backup`) keep
+7 days; a retention service expires low-level rows (app_logs 30 d,
+mt5_requests 14 d, account_snapshots 30 d, performance_metrics 14 d,
+health_checks 30 d) and refuses to touch trades/signals/audit/journal.
+**Reason:** A trading journal must survive cloud outages and laptops
+turning off mid-write (WAL keeps readers/writer unblocked); snapshots
+protect against disk corruption; retention keeps the DB small without ever
+deleting the irreplaceable records (SPEC E1).
+
+### ADR-0014 — Statements-split DDL migrations (Phase 4)
+**Decision:** `MigrationRunner` splits each migration script with
+`sqlite3.complete_statement` and executes the statements plus the
+`schema_migrations` ledger row inside one BEGIN IMMEDIATE transaction.
+`executescript` is never used in the runner.
+**Reason:** `executescript` implicitly COMMITs any open transaction, which
+would silently break the all-or-nothing guarantee; transactional DDL makes
+a crash mid-migration roll the whole step back.
+
 ## Planned layer additions (per phase)
 
 - Phase 2: `observability/` categories, trace ids, masking, crash handler,
@@ -159,7 +199,7 @@ policy-enforced.
   FakeMT5 in `tests/fakes/` (done).
   Watchdog heartbeats are wired to the gateway thread; startup log gains
   MT5 build, broker and account fields.
-- Phase 4: `storage/` sqlite + migrations + outbox + supabase.
+- Phase 4: `storage/` db + migrations + repositories + outbox + mirror + audit + backup + cleanup + log sink + history import (done).
 - Phase 5: `analysis/` + chart.
 - Phase 6: `strategies/` + `engine/signal_pipeline`.
 - Phase 7: `risk/`.

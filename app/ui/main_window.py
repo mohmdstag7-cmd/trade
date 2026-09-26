@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import partial
+from typing import Any
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeySequence, QShortcut
@@ -40,6 +41,8 @@ class MainWindow(QMainWindow):
         theme_manager: ThemeManager,
         logs_page: QWidget | None = None,
         parent: QWidget | None = None,
+        *,
+        storage: Any | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("MainWindow")
@@ -48,6 +51,7 @@ class MainWindow(QMainWindow):
         self._translator = translator
         self._theme_manager = theme_manager
         self._logs_page = logs_page
+        self._storage = storage
 
         self.setWindowTitle(translator.translate("app.title"))
         self.setMinimumSize(1024, 640)
@@ -66,7 +70,9 @@ class MainWindow(QMainWindow):
         self._pages: dict[str, QWidget] = {}
         for meta in PAGES:
             if meta.key == "settings":
-                page: QWidget = SettingsPage(translator, theme_manager, self, bus=bus)
+                page: QWidget = SettingsPage(
+                    translator, theme_manager, self, bus=bus, storage=storage
+                )
             elif meta.key == "logs" and logs_page is not None:
                 page = logs_page
             else:

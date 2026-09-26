@@ -10,6 +10,10 @@ Phase 3 adds real-terminal diagnostics (SPEC C13, G3-3):
 - ``--mt5-smoke-test``: read-only connection health report.
 - ``--mt5-trade-test``: one minimal order on a DEMO account only.
 
+Phase 4 adds storage diagnostics (SPEC E1, G3-4):
+- ``--db-check``: migrate the local database, print stats, verify integrity.
+- ``--self-check`` now also proves the storage layer works in the package.
+
 Later phases extend the CLI (``--profile NAME``) without changing the
 structure of this module.
 """
@@ -27,7 +31,7 @@ from typing import Any
 
 from app.__version__ import __version__
 from app.observability.logger import init_logging
-from app.observability.paths import default_crash_reports_dir, default_logs_dir
+from app.observability.paths import default_crash_reports_dir, default_data_dir, default_logs_dir
 
 SELF_CHECK_OK = "SELF-CHECK OK"
 SELF_CHECK_FAIL = "SELF-CHECK FAIL"
@@ -46,10 +50,10 @@ def _import_mt5() -> ModuleType:
 
 
 def run_self_check(import_mt5: Callable[[], ModuleType] = _import_mt5) -> int:
-    """Verify the MetaTrader5 package imports and report its version.
+    """Verify the MetaTrader5 package and the storage layer.
 
-    Exit code semantics (SPEC I2): 0 = package usable, 1 = package missing or
-    broken. A production build must never fall back to fake data.
+    Exit code semantics (SPEC I2): 0 = everything usable, 1 = something is
+    missing or broken. A production build must never fall back to fake data.
     """
     try:
         module = import_mt5()
@@ -57,8 +61,36 @@ def run_self_check(import_mt5: Callable[[], ModuleType] = _import_mt5) -> int:
         print(f"{SELF_CHECK_FAIL}: MetaTrader5 package could not be loaded: {exc!r}")
         return 1
     version = getattr(module, "__version__", "unknown")
-    print(f"{SELF_CHECK_OK}: MetaTrader5 {version}")
+
+    storage_error = _probe_storage()
+    if storage_error is not None:
+        print(f"{SELF_CHECK_FAIL}: storage layer broken: {storage_error}")
+        return 1
+    print(f"{SELF_CHECK_OK}: MetaTrader5 {version}; storage OK")
     return 0
+
+
+def _probe_storage() -> str | None:
+    """Migrate a throwaway database; return an error message or None."""
+    import pathlib
+    import tempfile
+
+    from app.storage.db import Database
+    from app.storage.migrations import MigrationRunner
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="mt5ws-check-") as tmp:
+            db = Database(pathlib.Path(tmp) / "probe.db")
+            try:
+                runner = MigrationRunner(db)
+                runner.run_all()
+                if not runner.verify() or db.row_count("outbox") != 0:
+                    return "migration or integrity check failed"
+            finally:
+                db.close_all()
+    except Exception as exc:
+        return repr(exc)
+    return None
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -85,6 +117,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--mt5-trade-test",
         action="store_true",
         help="open+close one minimal order — DEMO accounts only (0/1)",
+    )
+    parser.add_argument(
+        "--db-check",
+        action="store_true",
+        help="migrate the local database, print stats and verify integrity (0/1)",
+    )
+    parser.add_argument(
+        "--data-dir",
+        default="",
+        help="override the application data directory (used with --db-check)",
     )
     mt5 = parser.add_argument_group("MT5 connection")
     mt5.add_argument("--login", type=int, default=0, help="MT5 account number")
@@ -252,6 +294,47 @@ def run_mt5_trade_test(args: argparse.Namespace) -> int:
         gateway.stop()
 
 
+def run_db_check(args: argparse.Namespace) -> int:
+    """Migrate the local database, print stats. Exit 0 = integrity OK."""
+    import contextlib
+    import pathlib
+
+    from app.observability.paths import default_data_dir
+    from app.storage.migrations import MigrationRunner
+    from app.storage.service import StorageService
+
+    data_dir = pathlib.Path(args.data_dir) if args.data_dir else default_data_dir()
+    service = StorageService(data_dir)
+    try:
+        applied = MigrationRunner(service.db).run_all()
+        stats = service.stats()
+        stats["applied_migrations"] = [m.version for m in applied]
+    except Exception as exc:
+        print(f"DB CHECK FAILED: {exc}")
+        return 1
+    finally:
+        with contextlib.suppress(Exception):
+            service.db.close_all()
+
+    if args.json:
+        print(json.dumps(stats, indent=2, ensure_ascii=False))
+    else:
+        print(f"Database: {stats['path']}")
+        print(
+            f"Size: {stats['size_bytes'] / 1024:.1f} KB (WAL {stats['wal_size_bytes'] / 1024:.1f} KB)"
+        )
+        print(f"Schema version: {stats['version']}")
+        print(f"Integrity: {'OK' if stats['integrity_ok'] else 'BROKEN'}")
+        print(f"Backups kept: {stats['backups']}")
+        print(f"Cloud sync: {'ON' if stats['cloud_enabled'] else 'OFF (local-only mode)'}")
+        outbox = stats["outbox"]
+        if outbox:
+            print("Outbox: " + ", ".join(f"{k}={v}" for k, v in sorted(outbox.items())))
+        for table, n in sorted(stats["rows"].items()):
+            print(f"  {table}: {n}")
+    return 0 if stats["integrity_ok"] else 1
+
+
 def run_gui(debug: bool = False) -> int:
     """Compose the application and start the Qt event loop."""
     log_state = init_logging(logs_dir=default_logs_dir(), debug=debug)
@@ -262,6 +345,7 @@ def run_gui(debug: bool = False) -> int:
     from app.core.settings import UiSettings
     from app.observability import crash_handler
     from app.observability.logger import log_startup, shutdown_logging
+    from app.storage.service import StorageService
     from app.ui.i18n.translator import Translator
     from app.ui.main_window import MainWindow
     from app.ui.pages.logs import LogsPage
@@ -290,6 +374,21 @@ def run_gui(debug: bool = False) -> int:
     qt_app.setApplicationDisplayName(translator.translate("app.title"))
     qt_app.setLayoutDirection(translator.layout_direction())
 
+    # Storage opens before the window so the Settings card can show live stats.
+    storage: StorageService | None = None
+    try:
+        storage = StorageService(default_data_dir())
+        storage.open()
+        storage.audit.app_started(__version__)
+    except Exception as exc:
+        # Storage failures must never take the whole app down at startup.
+        import loguru
+
+        loguru.logger.opt(exception=True).error(
+            "storage: starting in local-safe mode failed: {}", exc
+        )
+        storage = None
+
     logs_page = LogsPage(translator, log_state.ring, log_state.logs_dir)
     window = MainWindow(
         bus=bus,
@@ -297,10 +396,14 @@ def run_gui(debug: bool = False) -> int:
         translator=translator,
         theme_manager=theme_manager,
         logs_page=logs_page,
+        storage=storage,
     )
     window.show()
     exit_code = qt_app.exec()
 
+    if storage is not None:
+        storage.audit.app_stopped(__version__)
+        storage.close()
     shutdown_logging()
     return exit_code
 
@@ -319,6 +422,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_mt5_smoke_test(args)
     if args.mt5_trade_test:
         return run_mt5_trade_test(args)
+    if args.db_check:
+        return run_db_check(args)
     return run_gui(debug=args.debug)
 
 

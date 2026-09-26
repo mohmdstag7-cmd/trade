@@ -215,6 +215,49 @@ class OrderResultSnapshot:
         return self.retcode in (RETCODE_DONE, RETCODE_PLACED, RETCODE_DONE_PARTIAL)
 
 
+# ---------------------------------------------------------------------------
+# History deals (Phase 4 history import)
+# ---------------------------------------------------------------------------
+
+DEAL_TYPE_BUY = 0
+DEAL_TYPE_SELL = 1
+
+DEAL_ENTRY_IN = 0
+DEAL_ENTRY_OUT = 1
+DEAL_ENTRY_INOUT = 2
+DEAL_ENTRY_OUT_BY = 3
+
+#: Entries that CLOSE (or flip) a position — candidates for trade history.
+DEAL_ENTRY_CLOSURES: frozenset[int] = frozenset(
+    {DEAL_ENTRY_OUT, DEAL_ENTRY_INOUT, DEAL_ENTRY_OUT_BY}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class DealSnapshot:
+    """One historical deal (``history_deals_get`` row, typed)."""
+
+    ticket: int
+    order: int
+    time: int
+    time_msc: int
+    type: int
+    entry: int
+    magic: int
+    position_id: int
+    symbol: str
+    volume: float
+    price: float
+    commission: float
+    swap: float
+    profit: float
+    comment: str
+
+    @property
+    def closes_position(self) -> bool:
+        return self.entry in DEAL_ENTRY_CLOSURES
+
+
 @dataclass(slots=True)
 class GatewayStats:
     """Counters for the health page and diagnostics."""
