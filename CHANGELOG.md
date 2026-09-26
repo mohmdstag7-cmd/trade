@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versions are managed automatically by [release-please](https://github.com/googleapis/release-please)
 from Conventional Commits.
 
+## [0.4.1](https://github.com/mohmdstag7-cmd/trade/compare/v0.4.0...v0.4.1) (2026-09-26)
+
+
+### Documentation
+
+* refresh stale status lines + release-please auto-version annotation ([1f0dce1](https://github.com/mohmdstag7-cmd/trade/commit/1f0dce1425e90db0dbd3dfd3cf352a6c3456d1e4))
+* refresh stale status lines in README and PROGRESS ([5adbb53](https://github.com/mohmdstag7-cmd/trade/commit/5adbb533cf77d242fe89e9ee7f0c9002a148a9e8))
+
 ## [0.4.0](https://github.com/mohmdstag7-cmd/trade/compare/v0.3.0...v0.4.0) (2026-09-26)
 
 
