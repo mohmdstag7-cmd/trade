@@ -1,8 +1,8 @@
 """Status bar (SPEC F2): connection, mode badge, clock, theme/language toggles.
 
-Phase 1 shows only real state: the app is not connected to MT5 yet, so the
-connection dot is neutral and no account numbers are displayed. Real values
-arrive with Phase 3.
+v2: the connection dot is tri-state (connected / connecting / failed),
+reflecting the *live* shared-gateway state, and the clock renders in a
+monospace stack so digits stop jittering.
 """
 
 from __future__ import annotations
@@ -14,6 +14,14 @@ from PySide6.QtWidgets import QLabel, QPushButton, QStatusBar, QWidget
 
 from app.core.clock import broker_time_string, format_local_time
 from app.ui.i18n.translator import Translator
+
+#: Gateway states → (label key, dot property value).
+_GATEWAY_STATES: dict[str, tuple[str, str]] = {
+    "connecting": ("status.gateway.connecting", "connecting"),
+    "reconnecting": ("status.gateway.reconnecting", "connecting"),
+    "connected": ("status.connected", "true"),
+    "disconnected": ("status.disconnected", "false"),
+}
 
 
 def repolish(widget: QWidget) -> None:
@@ -40,7 +48,7 @@ class StatusBar(QStatusBar):
         # -- left side: connection + mode -----------------------------------
         self._dot = QLabel()
         self._dot.setObjectName("ConnectionDot")
-        self._dot.setProperty("connected", False)
+        self._dot.setProperty("connected", "false")
         self._dot.setToolTip("")
         self.addWidget(self._dot)
 
@@ -53,25 +61,27 @@ class StatusBar(QStatusBar):
 
         # -- right side: version, clock, toggles, kill switch ----------------
         self._version_label = QLabel(f"v{version}")
+        self._version_label.setObjectName("MonoLabel")
         self.addPermanentWidget(self._version_label)
 
         self._clock_label = QLabel()
+        self._clock_label.setObjectName("MonoLabel")
         self._clock_label.setToolTip("")
         self.addPermanentWidget(self._clock_label)
 
         self._theme_button = QPushButton()
-        self._theme_button.setObjectName("Badge")
+        self._theme_button.setObjectName("GhostButton")
         self._theme_button.setCursor(self.cursor())
         self._theme_button.clicked.connect(on_toggle_theme)
         self.addPermanentWidget(self._theme_button)
 
         self._language_button = QPushButton()
-        self._language_button.setObjectName("Badge")
+        self._language_button.setObjectName("GhostButton")
         self._language_button.clicked.connect(on_toggle_language)
         self.addPermanentWidget(self._language_button)
 
         self._kill_switch = QPushButton()
-        self._kill_switch.setObjectName("KillSwitchButton")
+        self._kill_switch.setObjectName("DangerButton")
         self._kill_switch.setEnabled(False)
         self.addPermanentWidget(self._kill_switch)
 
@@ -86,14 +96,28 @@ class StatusBar(QStatusBar):
 
         translator.language_changed.connect(lambda _lang: self.retranslate())
         self.retranslate()
+        # seed the dot property AFTER QSS is applied so repolish works later
+        self.set_gateway_state("disconnected", "")
 
     # -- public API (used by later phases) --------------------------------------
     def set_connection_state(self, connected: bool, detail: str = "") -> None:
-        """Update the connection dot, label and tooltip (Phase 3 detail)."""
-        self._dot.setProperty("connected", connected)
+        """Update the connection dot, label and tooltip (probe verdict)."""
+        self._dot.setProperty("connected", "true" if connected else "false")
         repolish(self._dot)
         key = "status.connected" if connected else "status.disconnected"
         self._connection_label.setText(self._translator.translate(key))
+        tooltip = self._translator.translate("status.connection.tooltip")
+        if detail:
+            tooltip = f"{detail} — {tooltip}"
+        self._connection_label.setToolTip(tooltip)
+        self._dot.setToolTip(tooltip)
+
+    def set_gateway_state(self, state: str, detail: str = "") -> None:
+        """Reflect the live shared-gateway state (connecting/connected/…)."""
+        label_key, dot_value = _GATEWAY_STATES.get(state, ("status.disconnected", "false"))
+        self._dot.setProperty("connected", dot_value)
+        repolish(self._dot)
+        self._connection_label.setText(self._translator.translate(label_key))
         tooltip = self._translator.translate("status.connection.tooltip")
         if detail:
             tooltip = f"{detail} — {tooltip}"
@@ -117,7 +141,6 @@ class StatusBar(QStatusBar):
     def retranslate(self) -> None:
         """Refresh all texts for the current language."""
         tr = self._translator.translate
-        self.set_connection_state(False)
         self._mode_badge.setText(tr("status.mode.none"))
         if self._broker_offset is not None:
             self._clock_label.setToolTip(
@@ -133,3 +156,4 @@ class StatusBar(QStatusBar):
         self._language_button.setToolTip(tr("status.language.tooltip"))
         self._kill_switch.setText(tr("status.killswitch"))
         self._kill_switch.setToolTip(tr("status.killswitch.tooltip"))
+        # connection label refreshes on the next gateway/probe event

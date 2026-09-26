@@ -11,8 +11,9 @@
 | 2 | Observability | **merged** | PR #9 |
 | 3 | MT5 connection (real) | **merged** | PR #14 |
 | 4 | Storage | **merged** | PR #17 |
-| 5 | Market data & analysis | **in review** | `phase/05-market-data` |
-| 6 | Strategies & signals | not started | — |
+| 5 | Market data & analysis | **merged** | PR #22 (`phase/05-market-data`) |
+| 5.5 | UI v2 + in-app updates (user request) | **in review** | `phase/06-ui-and-updates` |
+| 6 | Strategies & signals | not started | — (SPEC numbering unchanged) |
 | 7 | Risk | not started | — |
 | 8 | Execution | not started | — |
 | 9 | Backtesting | not started | — |
@@ -408,3 +409,83 @@ calendar within minutes; or import a CSV manually.
 - [x] Chart renders candles + volume + last price, theme-aware.
 - [x] Market page: cards for 3 symbols update on closed bars — verified
       in CI with the fake gateway (real-terminal check happens on your PC).
+
+## Phase 5.5 — UI v2 + in-app updates (user request)
+
+> Triggered by user feedback on 0.5.0: "the UI is not responsive, dimensions are
+> off, not beautiful/professional enough" + "add in-app updates that download
+> only the changed parts". Shipped as one phase: design-system v2, responsive
+> shell, persistent MT5 connect (a functional gap discovered from the user's
+> startup log) and a manifest-verified delta updater.
+
+### Built
+
+- **Design system v2** — `app/ui/theme/tokens.py` extended (semantic soft
+  backgrounds, borders-strong, hover/selected, chart grid, mono stack, type +
+  spacing + radius scales); `app/ui/theme/qss.py` rewritten to cover every
+  widget class in use (buttons incl. Accent/Ghost/Danger/Badge/Segment variants,
+  inputs + focus states, checkboxes/radios, tables/trees/lists + headers, tabs,
+  progress, sliders, splitters, menus, tooltips, scrollbars, tri-state
+  connection dot, semantic badges, toasts).
+- **Icons** — `app/ui/icons.py`: qtawesome (MDI) with a graceful no-icon
+  fallback; sidebar, collapse chevron and empty states theme their icons.
+- **Toasts** — `app/ui/widgets/toast.py`: stacked auto-dismiss notifications
+  anchored to the window corner (RTL-aware), used for probe results and update
+  availability.
+- **Responsive shell** — `main_window.py`: window geometry + maximized state
+  persist (QSettings), min size 1020×640, toasts host; `market.py`: horizontal
+  `QSplitter` (chart | analysis column) with min widths + stretch, segmented
+  symbol selector, mono numerals for levels/trend; `settings.py`: centered
+  780 px card column inside a scroll area (no more clipped forms on narrow
+  windows); empty states got icon + chip headers.
+- **High-DPI + clean logs** — PassThrough rounding policy set before
+  QApplication; a Qt message handler routes Qt output into loguru and swallows
+  pyqtgraph's harmless `QStyleHints` UniqueConnection warning (the one visible
+  in the user's startup log).
+- **Persistent MT5 connect (gap fix)** — Settings → Connect/Disconnect now
+  drives the *shared* gateway via `ConnectWorker` (QThread; UI never blocks);
+  auto-connect on startup with saved credentials (checkbox persisted); the
+  gateway's live state (connecting/connected/reconnecting/disconnected) is
+  mirrored on the EventBus into the status bar. Until 0.5.0 the GUI had no way
+  to connect the shared gateway at all — Market stayed offline forever.
+- **In-app delta updater** — `app/updater/` (version, manifest, github,
+  service, worker):
+  - CI writes `manifest.json` (SHA-256 + size of every file) into the portable
+    build and attaches it to the release; `tools/build_delta.py` compares the
+    previous release's portable zip and publishes
+    `delta-v<old>-to-v<new>.zip` containing only changed files
+    (+ `__delta__.json` removals).
+  - The app checks `releases/latest/download/manifest.json` (no API rate
+    limits, no token, repo is public), picks delta when possible with full-zip
+    fallback, **verifies every staged byte against the new manifest**, and
+    stages a sibling `MT5TradingWorkstation.update-<ver>/` folder.
+  - Install = generated `apply_update_<ver>.bat`: waits for the app PID to
+    exit, deletes the manifest-listed removed files, `robocopy /E` staging →
+    app dir, relaunches. User data (SQLite, logs, calendar) lives in
+    `%LOCALAPPDATA%\MT5TradingWorkstation` and is never touched.
+  - UI: Settings → Updates card (check now, download progress, "Restart &
+    install") + optional startup check (default on, notify-only via toast).
+  - Dev mode (running from source) disables the updater explicitly.
+
+### How to verify (your PC, Windows)
+
+```bat
+MT5TradingWorkstation.exe            :: new look everywhere; resize the window —
+                                     :: the Market split and Settings column adapt
+:: Settings → Connect (or tick auto-connect): status bar shows live state,
+:: Market page fills with data after the first closed bar
+:: Settings → Updates → Check for updates: downloads only the delta when a new
+:: release exists, then "Restart & install" applies it without a manual download
+```
+
+### Acceptance
+
+- [x] Design tokens + full QSS for both themes — tested.
+- [x] Window geometry persists across restarts — implemented (QSettings).
+- [x] Market page responsive via splitter; settings column centered/scrollable.
+- [x] Persistent connect/disconnect + auto-connect + live gateway state — tested.
+- [x] Delta update pipeline (manifest build/diff/verify/apply) — 18 unit tests,
+      network fully faked; apply script content asserted.
+- [x] Release workflow publishes `manifest.json` + `delta-v*.zip` + checksums.
+- [x] The `QStyleHints` startup warning is filtered; all Qt output now flows
+      into the observability layer.

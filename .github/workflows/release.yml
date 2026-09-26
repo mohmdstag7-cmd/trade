@@ -40,9 +40,52 @@ jobs:
         run: |
           dist\MT5TradingWorkstation\MT5TradingWorkstation.exe --self-check
 
+      - name: Build the update manifest (Phase 6 delta updates)
+        run: |
+          python tools\build_manifest.py dist\MT5TradingWorkstation --version $env:GITHUB_REF_NAME.TrimStart("v")
+
+      - name: Copy the manifest out as a release asset
+        run: |
+          Copy-Item dist\MT5TradingWorkstation\manifest.json manifest.json
+
       - name: Zip portable build
         run: |
           Compress-Archive -Path dist\MT5TradingWorkstation -DestinationPath MT5TradingWorkstation-portable.zip
+
+      - name: Build the delta package against the previous release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart("v")
+          $prev = gh release view --repo $env:GITHUB_REPOSITORY --json tagName 2>$null | ConvertFrom-Json
+          if (-not $prev -or -not $prev.tagName) {
+            Write-Host "No previous release — skipping delta package."
+            exit 0
+          }
+          $prevVersion = $prev.tagName.TrimStart("v")
+          if ($prevVersion -eq $version) {
+            Write-Host "Previous tag equals this tag — skipping delta package."
+            exit 0
+          }
+          New-Item -ItemType Directory -Force -Path prev_download | Out-Null
+          gh release download $prev.tagName --repo $env:GITHUB_REPOSITORY `
+            --pattern "MT5TradingWorkstation-portable.zip" --dir prev_download
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "Previous portable zip unavailable — skipping delta package."
+            exit 0
+          }
+          Expand-Archive -Path prev_download\MT5TradingWorkstation-portable.zip -DestinationPath prev_extract
+          python tools\build_delta.py `
+            --prev-dir prev_extract\MT5TradingWorkstation `
+            --new-dir dist\MT5TradingWorkstation `
+            --from-version $prevVersion --to-version $version `
+            --out "delta-v$prevVersion-to-v$version.zip"
+          if ($LASTEXITCODE -eq 3) {
+            Write-Host "No file differences — no delta needed."
+            exit 0
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
@@ -59,8 +102,11 @@ jobs:
         run: |
           $files = @(
             "dist\installer\MT5TradingWorkstation-Setup-$($env:GITHUB_REF_NAME.TrimStart('v')).exe",
-            "MT5TradingWorkstation-portable.zip"
+            "MT5TradingWorkstation-portable.zip",
+            "manifest.json"
           )
+          $deltas = Get-ChildItem -Path . -Filter "delta-v*.zip" -ErrorAction SilentlyContinue
+          foreach ($delta in $deltas) { $files += $delta.Name }
           $hashLines = foreach ($file in $files) {
             $hash = (Get-FileHash -Algorithm SHA256 $file).Hash
             "$hash  $(Split-Path -Leaf $file)"
@@ -74,5 +120,7 @@ jobs:
           files: |
             dist/installer/MT5TradingWorkstation-Setup-*.exe
             MT5TradingWorkstation-portable.zip
+            manifest.json
+            delta-v*.zip
             checksums.txt
           generate_release_notes: true

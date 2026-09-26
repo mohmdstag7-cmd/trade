@@ -335,13 +335,15 @@ def run_db_check(args: argparse.Namespace) -> int:
     return 0 if stats["integrity_ok"] else 1
 
 
-def _build_market_service() -> Any:
+def _build_market_service(bus: Any) -> tuple[Any, Any | None]:
     """Create the Phase 5 market analysis service (gateway optional).
 
     One long-lived gateway is owned by the app shell and shared with the
     analysis pipeline; the Settings card keeps its one-shot probes (the
-    engine phases consolidate ownership). The calendar store lives under
-    the data dir and is fed by the MQL5 exporter CSV (SPEC C3.9).
+    engine phases consolidate ownership). The gateway's live state is
+    mirrored onto the event bus so the status bar can react. The calendar
+    store lives under the data dir and is fed by the MQL5 exporter CSV
+    (SPEC C3.9).
     """
     import time as _time
 
@@ -351,9 +353,14 @@ def _build_market_service() -> Any:
     from app.calendar.importer import ExporterFilePoller
     from app.mt5.gateway import MT5Gateway
 
+    def _mirror_state(state: Any) -> None:
+        bus.gateway_state_changed.emit(state.value, "")
+
     gateway: MT5Gateway | None = None
     try:
-        gateway = MT5Gateway(mt5_factory=_import_mt5, request_timeout_s=30.0)
+        gateway = MT5Gateway(
+            mt5_factory=_import_mt5, request_timeout_s=30.0, on_state_change=_mirror_state
+        )
         gateway.start()
     except Exception:  # pragma: no cover - never block startup on MT5
         import loguru
@@ -372,17 +379,85 @@ def _build_market_service() -> Any:
         clock=clock,
         calendar_store=store,
         calendar_poller=poller,
+    ), gateway
+
+
+def _maybe_auto_connect(gateway: Any, bus: Any) -> None:
+    """Connect at startup when the account is configured and allowed to."""
+    from app.core.settings import Mt5AccountSettings
+    from app.mt5.credentials import CredentialStore, CredentialStoreError
+    from app.mt5.models import ConnectRequest
+    from app.ui.workers import ConnectWorker
+
+    account = Mt5AccountSettings.load()
+    if not account.is_configured or not account.auto_connect or gateway is None:
+        return
+    try:
+        password = CredentialStore().get_password(account.login) or ""
+    except CredentialStoreError:
+        password = ""
+    if not password:
+        return
+    request = ConnectRequest(
+        login=account.login,
+        password=password,
+        server=account.server,
+        terminal_path=account.terminal_path,
     )
+
+    def _on_result(ok: bool, detail: str) -> None:
+        import loguru
+
+        if ok:
+            loguru.logger.info("startup: auto-connect OK ({})", detail)
+        else:
+            loguru.logger.warning("startup: auto-connect failed: {}", detail)
+        bus.gateway_state_changed.emit("connected" if ok else "disconnected", detail)
+
+    worker = ConnectWorker(gateway, request)
+    worker.result_ready.connect(_on_result)
+    worker.start()
+    # keep a module-level reference so the thread is not garbage collected
+    _maybe_auto_connect._worker = worker  # type: ignore[attr-defined]
+
+
+def _install_qt_message_filter() -> None:
+    """Route Qt messages to loguru; drop known third-party noise.
+
+    pyqtgraph connects to ``QStyleHints.colorSchemeChanged`` with a
+    UniqueConnection to a plain function, which Qt 6 logs as a warning
+    on every import. The message is harmless — we swallow exactly that
+    text and forward everything else.
+    """
+    from PySide6.QtCore import QtMsgType, qInstallMessageHandler
+
+    def _handler(mode: Any, context: Any, message: str) -> None:
+        import loguru
+
+        if "unique connections require a pointer to member function" in message:
+            return
+        if mode == QtMsgType.QtWarningMsg:
+            loguru.logger.warning("qt: {}", message)
+        elif mode == QtMsgType.QtCriticalMsg:
+            loguru.logger.error("qt: {}", message)
+        elif mode == QtMsgType.QtFatalMsg:
+            loguru.logger.critical("qt: {}", message)
+        else:
+            loguru.logger.debug("qt: {}", message)
+
+    qInstallMessageHandler(_handler)
 
 
 def run_gui(debug: bool = False) -> int:
     """Compose the application and start the Qt event loop."""
     log_state = init_logging(logs_dir=default_logs_dir(), debug=debug)
 
+    from PySide6.QtCore import Qt, QTimer
+    from PySide6.QtGui import QGuiApplication
     from PySide6.QtWidgets import QApplication
 
     from app.core.event_bus import EventBus
-    from app.core.settings import UiSettings
+    from app.core.settings import UiSettings, load_check_updates
     from app.observability import crash_handler
     from app.observability.logger import log_startup, shutdown_logging
     from app.storage.service import StorageService
@@ -397,6 +472,13 @@ def run_gui(debug: bool = False) -> int:
     )
     log_startup()
 
+    # High-DPI: honor the OS scale factor exactly (Qt6 default, set
+    # explicitly so a rounding policy inherited from the environment
+    # never blurs the UI). Must happen before QApplication exists.
+    QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
+        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+    )
+
     existing = QApplication.instance()
     qt_app: QApplication = (
         existing if isinstance(existing, QApplication) else QApplication(sys.argv)
@@ -404,6 +486,7 @@ def run_gui(debug: bool = False) -> int:
     qt_app.setApplicationName("MT5 Trading Workstation")
     qt_app.setOrganizationName("MT5TradingWorkstation")
     qt_app.setStyle("Fusion")
+    _install_qt_message_filter()
 
     settings = UiSettings.load()
     translator = Translator(settings)
@@ -432,8 +515,9 @@ def run_gui(debug: bool = False) -> int:
     logs_page = LogsPage(translator, log_state.ring, log_state.logs_dir)
 
     # Market analysis (Phase 5): the gateway is optional — the page shows an
-    # offline empty state until the user connects on the Settings page.
-    market_service = _build_market_service()
+    # offline empty state until the user connects (Settings → Connect, or
+    # the Phase 6 auto-connect with saved credentials).
+    market_service, shared_gateway = _build_market_service(bus)
 
     window = MainWindow(
         bus=bus,
@@ -443,8 +527,16 @@ def run_gui(debug: bool = False) -> int:
         logs_page=logs_page,
         storage=storage,
         market_analysis=market_service,
+        shared_gateway=shared_gateway,
     )
     window.show()
+
+    # Phase 6 conveniences: reconnect automatically, then ask for updates —
+    # both after the window is visible so startup stays snappy.
+    QTimer.singleShot(1500, lambda: _maybe_auto_connect(shared_gateway, bus))
+    if load_check_updates():
+        QTimer.singleShot(4000, lambda: _startup_update_check(window))
+
     exit_code = qt_app.exec()
 
     if storage is not None:
@@ -452,6 +544,34 @@ def run_gui(debug: bool = False) -> int:
         storage.close()
     shutdown_logging()
     return exit_code
+
+
+def _startup_update_check(window: Any) -> None:
+    """Ask GitHub whether a newer release exists; toast when it does."""
+    from app.__version__ import __version__
+    from app.updater.service import UpdateService
+    from app.updater.worker import UpdateWorker
+
+    service = UpdateService(current_version=__version__)
+    if not service.enabled:
+        return
+    window._startup_update_worker = UpdateWorker(service, "check")
+
+    def _on_check(result: object, _error: str) -> None:
+        from app.updater.service import CheckResult
+
+        if isinstance(result, CheckResult) and result.available and result.plan:
+            window.toast(
+                window._translator.translate("updates.available", version=result.plan.new_version),
+                window._translator.translate("updates.whats_new"),
+                "info",
+            )
+            settings_page = window._pages.get("settings")
+            if settings_page is not None:
+                settings_page.apply_check_result(result)
+
+    window._startup_update_worker.check_finished.connect(_on_check)
+    window._startup_update_worker.start()
 
 
 def main(argv: list[str] | None = None) -> int:
