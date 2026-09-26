@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versions are managed automatically by [release-please](https://github.com/googleapis/release-please)
 from Conventional Commits.
 
+## [0.7.0](https://github.com/mohmdstag7-cmd/trade/compare/v0.6.4...v0.7.0) (2026-09-26)
+
+
+### Features
+
+* **diagnostics:** named gateways, non-destructive probe, market pipeline logs ([31edf52](https://github.com/mohmdstag7-cmd/trade/commit/31edf526b692bf6362f1fb75d4055a0816bd0214))
+* **diagnostics:** named gateways, non-destructive probe, market pipeline logs ([685d5a6](https://github.com/mohmdstag7-cmd/trade/commit/685d5a69b81e1f73846f609282730f723c6d0619))
+
 ## [0.6.4](https://github.com/mohmdstag7-cmd/trade/compare/v0.6.3...v0.6.4) (2026-09-26)
 
 
