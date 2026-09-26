@@ -7,8 +7,8 @@
 
 | # | Phase | Status | Branch / PR |
 |---|-------|--------|-------------|
-| 1 | Foundation | **in review** | `phase/01-foundation` |
-| 2 | Observability | not started | — |
+| 1 | Foundation | **merged** | PR #1 |
+| 2 | Observability | **in review** | `phase/02-observability` |
 | 3 | MT5 connection (real) | not started | — |
 | 4 | Storage | not started | — |
 | 5 | Market data & analysis | not started | — |
@@ -22,7 +22,7 @@
 | 13 | Reliability | not started | — |
 | 14 | Release | not started | — |
 
-## Phase 1 — Foundation (current)
+## Phase 1 — Foundation (merged)
 
 ### Built
 
@@ -59,8 +59,9 @@ python -m app
 - [x] App launches (`python -m app`) — verified by pytest-qt smoke tests.
 - [x] Theme switches (status bar button, palette, settings page) — tested.
 - [x] Lint/tests pass locally (ruff, mypy, pytest).
-- [ ] CI green on the PR (checked when the PR runs).
-- [ ] Build artifact downloads and runs `--self-check` (build workflow).
+- [x] CI green on the PR (lint & test, build self-check, CodeQL).
+- [x] Build artifact downloads and runs `--self-check` (verified on the PR).
+- [x] Merged into `main` (PR #1).
 
 ### Known issues / limitations
 
@@ -74,6 +75,79 @@ python -m app
 
 ### Next steps
 
-1. Merge Phase 1 PR after CI is green and the artifact self-check passes.
-2. Phase 2 — Observability: logger categories, trace ids, masking, crash
-   handler, watchdog, basic Logs page (SPEC E3, G3-2).
+1. ~~Merge Phase 1 PR after CI is green~~ — merged (PR #1).
+2. ~~Phase 2 — Observability~~ — built, in review (see below).
+
+## Phase 2 — Observability (current)
+
+### Built
+
+- **Structured logging** (`app/observability/logger.py`, SPEC E3.1–E3.4):
+  loguru-based, non-blocking (`enqueue=True`). One lazy sink per category
+  writing `logs/<category>/<date>.jsonl` (one JSON object per line with UTC
+  time, level, category, module, function, line, thread, session id, trace
+  id, message and optional signal/trade/ticket/symbol/strategy ids), a
+  readable `logs/all.log`, and a colored stderr sink. Size rotation, daily
+  files, zip compression, 30-day retention and a total size cap with an
+  oldest-first prune (background maintenance thread).
+- **16 categories** (app, mt5, market_data, analysis, strategy, ml, risk,
+  execution, position, sync, backtest, ui, notify, llm, audit, perf) with
+  runtime-changeable levels (`set_category_level`) and a debug window
+  (`enable_debug_mode(minutes)`) that auto-reverts by expiry.
+- **Correlation context** (`context.py`): per-run session id and trace ids
+  on `ContextVar`s; `trace()` context manager; every record is stamped by
+  the logging patcher.
+- **Secret masking** (`masking.py`): `password/token/api_key/...` values in
+  `key=value`, `key: value`, JSON, URL-query and `Bearer` shapes are
+  redacted in every message, string extra, dict payload and crash report.
+- **Crash handler** (`crash_handler.py`, SPEC E3.8): `sys.excepthook`,
+  `threading.excepthook` and the Qt message handler write
+  `crash_reports/crash_<UTC>_<kind>.json` (stack, last 200 log lines,
+  versions, OS, session/trace, thread) and invoke a friendly dialog.
+- **Watchdog** (`watchdog.py`, SPEC E3.9): workers register heartbeats;
+  freeze > timeout → CRITICAL log + notify + optional restart callback;
+  injectable clock for deterministic tests.
+- **Logs page** (`app/ui/pages/logs.py`): live view of recent entries from
+  the in-memory ring buffer with level/category/search filters, auto-refresh
+  toggle and open-folder action; full EN/FA translations.
+- Startup log (app/python/OS/session) per SPEC E3.12 (MT5 fields arrive in
+  Phase 3); graceful `shutdown_logging()` on exit.
+- Tests: masking (26), context (10), logging (17), crash handler (6),
+  watchdog (10), logs page (12) — 118 total, 90% coverage.
+
+### How to run / verify
+
+```bat
+pip install -e ".[dev]"
+ruff check .
+ruff format --check .
+mypy app
+pytest
+python -m app        # Logs page now shows live entries; %LOCALAPPDATA%\MT5TradingWorkstation\logs
+```
+
+### Acceptance checklist (SPEC G3-2)
+
+- [x] A forced exception produces a crash report — tested
+      (`test_crash_handler.py`); secrets inside the report are masked.
+- [x] Secrets are masked in logs — tested (`test_masking.py`,
+      `test_logging.py`, end-to-end smoke run).
+- [x] Lint/tests pass locally (ruff, mypy, pytest 118/118).
+- [ ] CI green on the PR (checked when the PR runs).
+- [ ] Build artifact runs `--self-check` (build workflow).
+
+### Known issues / limitations
+
+- The Logs page reads the in-memory ring (last 500 entries); disk search,
+  the trace timeline and the debug bundle arrive in Phase 13 (SPEC G3-13).
+- Supabase log shipping (WARNING+ → `app_logs`) arrives with Storage
+  (Phase 4, SPEC E2).
+- Watchdog restart callbacks are wired when the first worker (MT5 gateway)
+  exists in Phase 3.
+
+### Next steps
+
+1. Merge Phase 2 PR after CI is green.
+2. Phase 3 — MT5 connection (real): gateway thread on the real
+   MetaTrader5 package, FakeMT5 for tests, test-connection checklist,
+   account profiles, connection diagnostics (SPEC G3-3).

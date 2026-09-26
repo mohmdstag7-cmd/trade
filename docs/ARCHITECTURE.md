@@ -3,7 +3,7 @@
 > Updated at the end of every phase (SPEC A5). Decisions are recorded ADR-style:
 > **decision + reason**. For the full product specification see `docs/SPEC.md`.
 
-## Current state: Phase 1 (Foundation)
+## Current state: Phase 2 (Observability)
 
 ```
 ┌────────────────────────────────────────────────────────────┐
@@ -14,8 +14,9 @@
 │                       Core layer                            │
 │  event_bus ─ settings (QSettings) ─ clock (UTC/local)       │
 ├────────────────────────────────────────────────────────────┤
-│                    Observability                            │
-│  logger bootstrap (loguru) — full E3 in Phase 2             │
+│                    Observability (Qt-free)                  │
+│  logger (16 categories → JSONL) ─ context (session/trace)   │
+│  masking (secrets) ─ crash handler ─ watchdog ─ ring buffer │
 ├────────────────────────────────────────────────────────────┤
 │  MT5 gateway (Phase 3) · Storage (Phase 4) · Engine (6-8)   │
 │  Analysis (5) · ML (10) · Backtest (9) · Analytics (11)     │
@@ -31,7 +32,7 @@
 | `app/core/event_bus.py` | Typed Qt-signal pub/sub (`theme_changed`, `language_changed`, `navigate_requested`) |
 | `app/core/settings.py` | `UiSettings` — validated, persisted UI state (theme, language, sidebar) via QSettings INI |
 | `app/core/clock.py` | UTC now + local display formatting |
-| `app/observability/logger.py` | loguru console bootstrap; expands into E3 categories in Phase 2 |
+| `app/observability/logger.py` | Structured per-category JSONL logging, rotation/retention/size-cap, runtime levels, debug window, ring buffer |
 | `app/ui/theme/tokens.py` | Design tokens: `DARK` / `LIGHT` palettes (SPEC F1) |
 | `app/ui/theme/qss.py` | Full stylesheet generated from tokens (objectName/property driven) |
 | `app/ui/theme/manager.py` | `ThemeManager`: apply/persist/toggle, emits `theme_changed` |
@@ -42,6 +43,12 @@
 | `app/ui/widgets/sidebar.py` | Grouped, collapsible, persisted sidebar |
 | `app/ui/widgets/status_bar.py` | Connection dot, mode badge, clock, toggles, kill-switch slot |
 | `app/ui/widgets/command_palette.py` | Ctrl+K command palette (filter + rank + keyboard) |
+| `app/observability/context.py` | Session id + trace ids on ContextVars; `trace()` context manager |
+| `app/observability/masking.py` | Secret redaction for messages, extras, dicts, crash reports |
+| `app/observability/crash_handler.py` | sys/threading/Qt hooks → `crash_reports/*.json` + friendly dialog |
+| `app/observability/watchdog.py` | Heartbeat registry, freeze detection, notify/restart callbacks |
+| `app/observability/paths.py` | Platform data dirs for logs and crash reports |
+| `app/ui/pages/logs.py` | Basic Logs page: level/category/search filters over the ring |
 | `app/ui/main_window.py` | Composes everything; page switching; language/theme reactions |
 | `installer/app.spec` | PyInstaller one-folder build incl. MetaTrader5 hidden import |
 | `installer/innosetup.iss` | Per-user installer (no admin; SPEC I2) |
@@ -102,11 +109,26 @@ arrives with engine/config phases.
 **Reason:** Boring, reliable, zero extra dependencies now; the wrapper keeps
 the public surface stable.
 
+### ADR-0009 — Lazy per-category sinks + in-memory ring (Phase 2)
+**Decision:** One loguru sink per category writing
+`logs/<category>/<date>.jsonl` (created lazily on first use), a readable
+`all.log`, and a bounded in-memory ring buffer that feeds crash reports and
+the Logs page. Every record is shaped by one global patcher that stamps
+session/trace ids (ContextVar-based) and applies the masking filter before
+anything reaches disk.
+**Reason:** Idle categories cost nothing; levels can change at runtime
+because filters are consulted at emit time; the ring gives crash reports
+and the UI instant, lock-cheap access without touching files that
+background threads are writing; the patcher makes secrecy-by-default
+impossible to bypass by forgetting a filter (SPEC E3, C-security).
+
 ## Planned layer additions (per phase)
 
 - Phase 2: `observability/` categories, trace ids, masking, crash handler,
   watchdog, Logs page.
 - Phase 3: `mt5/` gateway + connection + symbols; FakeMT5 in `tests/fakes/`.
+  Watchdog heartbeats are wired to the gateway thread; startup log gains
+  MT5 build, broker and account fields.
 - Phase 4: `storage/` sqlite + migrations + outbox + supabase.
 - Phase 5: `analysis/` + chart.
 - Phase 6: `strategies/` + `engine/signal_pipeline`.

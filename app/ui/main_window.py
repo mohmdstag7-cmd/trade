@@ -38,6 +38,7 @@ class MainWindow(QMainWindow):
         settings: UiSettings,
         translator: Translator,
         theme_manager: ThemeManager,
+        logs_page: QWidget | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -46,6 +47,7 @@ class MainWindow(QMainWindow):
         self._settings = settings
         self._translator = translator
         self._theme_manager = theme_manager
+        self._logs_page = logs_page
 
         self.setWindowTitle(translator.translate("app.title"))
         self.setMinimumSize(1024, 640)
@@ -65,6 +67,8 @@ class MainWindow(QMainWindow):
         for meta in PAGES:
             if meta.key == "settings":
                 page: QWidget = SettingsPage(translator, theme_manager, self)
+            elif meta.key == "logs" and logs_page is not None:
+                page = logs_page
             else:
                 page = EmptyStatePage(meta, translator, self)
             self._pages[meta.key] = page

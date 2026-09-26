@@ -20,6 +20,7 @@ from types import ModuleType
 
 from app.__version__ import __version__
 from app.observability.logger import init_logging
+from app.observability.paths import default_crash_reports_dir, default_logs_dir
 
 SELF_CHECK_OK = "SELF-CHECK OK"
 SELF_CHECK_FAIL = "SELF-CHECK FAIL"
@@ -75,15 +76,24 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def run_gui(debug: bool = False) -> int:
     """Compose the application and start the Qt event loop."""
-    init_logging(debug=debug)
+    log_state = init_logging(logs_dir=default_logs_dir(), debug=debug)
 
     from PySide6.QtWidgets import QApplication
 
     from app.core.event_bus import EventBus
     from app.core.settings import UiSettings
+    from app.observability import crash_handler
+    from app.observability.logger import log_startup, shutdown_logging
     from app.ui.i18n.translator import Translator
     from app.ui.main_window import MainWindow
+    from app.ui.pages.logs import LogsPage
     from app.ui.theme.manager import ThemeManager
+
+    crash_handler.install_crash_handler(
+        reports_dir=default_crash_reports_dir(),
+        ring=log_state.ring,
+    )
+    log_startup()
 
     existing = QApplication.instance()
     qt_app: QApplication = (
@@ -102,14 +112,19 @@ def run_gui(debug: bool = False) -> int:
     qt_app.setApplicationDisplayName(translator.translate("app.title"))
     qt_app.setLayoutDirection(translator.layout_direction())
 
+    logs_page = LogsPage(translator, log_state.ring, log_state.logs_dir)
     window = MainWindow(
         bus=bus,
         settings=settings,
         translator=translator,
         theme_manager=theme_manager,
+        logs_page=logs_page,
     )
     window.show()
-    return qt_app.exec()
+    exit_code = qt_app.exec()
+
+    shutdown_logging()
+    return exit_code
 
 
 def main(argv: list[str] | None = None) -> int:
