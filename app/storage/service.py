@@ -169,13 +169,21 @@ class StorageService:
         return NullMirror()
 
     def load_cloud_credentials(self) -> tuple[str, str] | None:
-        """(url, key) from QSettings+vault, or None when not configured."""
+        """(url, key) from QSettings+vault, or None when not configured.
+
+        A missing or broken OS vault is treated as "not configured" — the
+        app keeps working in local-only mode (SPEC E1: no data loss offline).
+        """
         from app.core.settings import load_cloud_url
 
-        url = load_cloud_url()
-        if not url:
+        try:
+            url = load_cloud_url()
+            if not url:
+                return None
+            key = KeyringVault().get(SUPABASE_KEY_ENTRY)
+        except Exception as exc:  # VaultError and broken backends
+            log.warning("storage: cloud credentials unavailable ({}); local-only mode", exc)
             return None
-        key = KeyringVault().get(SUPABASE_KEY_ENTRY)
         if not key:
             return None
         return url, key

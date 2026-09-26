@@ -28,14 +28,18 @@ from PySide6.QtWidgets import (
 
 from app.__version__ import __version__
 from app.core.event_bus import EventBus
-from app.core.settings import Mt5AccountSettings
+from app.core.settings import Mt5AccountSettings, load_cloud_url, save_cloud_url
 from app.mt5.credentials import CredentialStore, CredentialStoreError
 from app.mt5.diagnostics import ConnectionProbe
 from app.mt5.models import ConnectRequest
+from app.storage.cloud_probe import CloudProbe
+from app.storage.mirror import SUPABASE_KEY_ENTRY
+from app.storage.vault import KeyringVault, VaultError
 from app.ui.i18n.translator import Translator
 from app.ui.theme.manager import ThemeManager
 
 _PROBE_POLL_MS = 150
+_STORAGE_POLL_MS = 2000
 
 
 class SettingsPage(QWidget):
@@ -51,6 +55,7 @@ class SettingsPage(QWidget):
         credential_store: CredentialStore | None = None,
         mt5_factory: Any | None = None,
         bus: EventBus | None = None,
+        storage: Any | None = None,
     ) -> None:
         super().__init__(parent)
         self._translator = translator
@@ -59,7 +64,10 @@ class SettingsPage(QWidget):
         self._credential_store = credential_store or CredentialStore()
         self._mt5_factory = mt5_factory
         self._bus = bus
+        self._storage = storage
         self._probe: ConnectionProbe | None = None
+        self._cloud_probe: CloudProbe | None = None
+        self._vault = KeyringVault()
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(32, 32, 32, 32)
@@ -161,6 +169,10 @@ class SettingsPage(QWidget):
         connection_layout.addLayout(actions)
         outer.addWidget(connection)
 
+        # -- storage & sync card (Phase 4) --------------------------------------
+        if self._storage is not None:
+            self._build_storage_card(outer)
+
         # -- about card ------------------------------------------------------
         about = QFrame()
         about.setObjectName("Card")
@@ -183,6 +195,14 @@ class SettingsPage(QWidget):
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(_PROBE_POLL_MS)
         self._poll_timer.timeout.connect(self._poll_probe)
+
+        self._storage_timer: QTimer | None = None
+        if self._storage is not None:
+            self._storage_timer = QTimer(self)
+            self._storage_timer.setInterval(_STORAGE_POLL_MS)
+            self._storage_timer.timeout.connect(self._refresh_storage_stats)
+            self._storage_timer.start()
+            self._load_cloud_into_form()
 
         self._load_account_into_form()
         translator.language_changed.connect(lambda _lang: self.retranslate())
@@ -235,6 +255,8 @@ class SettingsPage(QWidget):
             return
         self._password_edit.clear()
         self._result_label.setText(tr("settings.account.password_saved"))
+        if self._storage is not None:
+            self._storage.audit.mt5_credentials_changed("saved")
 
     def _on_test_connection(self) -> None:
         tr = self._translator.translate
@@ -287,6 +309,194 @@ class SettingsPage(QWidget):
         if self._bus is not None:
             self._bus.mt5_connection_changed.emit(state.ok, state.detail)
 
+    # -- storage & sync card -----------------------------------------------------
+    def _build_storage_card(self, outer: QVBoxLayout) -> None:
+        tr = self._translator.translate
+        card = QFrame()
+        card.setObjectName("Card")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(12)
+
+        self._storage_title = QLabel()
+        self._storage_title.setObjectName("CardTitle")
+        layout.addWidget(self._storage_title)
+
+        # read-only status grid
+        self._db_label = QLabel()
+        self._db_label.setWordWrap(True)
+        self._size_label = QLabel()
+        self._schema_label = QLabel()
+        self._integrity_label = QLabel()
+        self._backups_label = QLabel()
+        self._outbox_label = QLabel()
+        self._last_sync_label = QLabel()
+        self._cloud_label = QLabel()
+        for widget in (
+            self._db_label,
+            self._size_label,
+            self._schema_label,
+            self._integrity_label,
+            self._backups_label,
+            self._outbox_label,
+            self._last_sync_label,
+            self._cloud_label,
+        ):
+            layout.addWidget(widget)
+
+        # cloud configuration form
+        self._cloud_url_label = QLabel()
+        self._cloud_url_edit = QLineEdit()
+        self._cloud_url_edit.setPlaceholderText(tr("settings.cloud.url.placeholder"))
+
+        self._cloud_key_label = QLabel()
+        self._cloud_key_edit = QLineEdit()
+        self._cloud_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(10)
+        form.addRow(self._cloud_url_label, self._cloud_url_edit)
+        form.addRow(self._cloud_key_label, self._cloud_key_edit)
+        layout.addLayout(form)
+
+        buttons = QHBoxLayout()
+        buttons.setContentsMargins(0, 0, 0, 0)
+        self._cloud_save_button = QPushButton()
+        self._cloud_save_button.setObjectName("PrimaryButton")
+        self._cloud_save_button.clicked.connect(self._on_save_cloud)
+        self._cloud_test_button = QPushButton()
+        self._cloud_test_button.clicked.connect(self._on_test_cloud)
+        self._cloud_remove_button = QPushButton()
+        self._cloud_remove_button.setObjectName("Badge")
+        self._cloud_remove_button.clicked.connect(self._on_remove_key)
+        buttons.addWidget(self._cloud_save_button)
+        buttons.addWidget(self._cloud_test_button)
+        buttons.addWidget(self._cloud_remove_button)
+        self._cloud_result_label = QLabel()
+        self._cloud_result_label.setWordWrap(True)
+        buttons.addWidget(self._cloud_result_label, 1)
+        layout.addLayout(buttons)
+
+        outer.addWidget(card)
+
+    def _load_cloud_into_form(self) -> None:
+        url = load_cloud_url()
+        if url:
+            self._cloud_url_edit.setText(url)
+
+    def _refresh_storage_stats(self) -> None:
+        """Periodic refresh of the read-only status labels (UI never blocks)."""
+        if self._storage is None:
+            return
+        tr = self._translator.translate
+        try:
+            stats = self._storage.stats()
+            sync = self._storage.sync_status()
+        except Exception:  # database closed / shutting down
+            return
+        size_kb = stats["size_bytes"] / 1024
+        wal_kb = stats["wal_size_bytes"] / 1024
+        self._db_label.setText(f"{tr('settings.storage.db')}: {stats['path']}")
+        self._size_label.setText(
+            f"{tr('settings.storage.size')}: {size_kb:.1f} KB (+{wal_kb:.1f} KB WAL)"
+        )
+        self._schema_label.setText(f"{tr('settings.storage.schema')}: {stats['version']}")
+        integrity_key = (
+            "settings.storage.integrity_ok"
+            if stats["integrity_ok"]
+            else "settings.storage.integrity_bad"
+        )
+        self._integrity_label.setText(f"{tr('settings.storage.integrity')}: {tr(integrity_key)}")
+        self._backups_label.setText(f"{tr('settings.storage.backups')}: {stats['backups']}")
+        outbox = stats["outbox"]
+        pending = outbox.get("pending", 0) + outbox.get("in_flight", 0)
+        queue_text = (
+            f"{tr('settings.storage.outbox')}: {pending} {tr('settings.storage.pending_suffix')}"
+        )
+        if outbox.get("dead"):
+            queue_text += f" · {outbox['dead']} {tr('settings.storage.dead_suffix')}"
+        self._outbox_label.setText(queue_text)
+        last = sync.get("last_synced_at") or tr("settings.storage.never")
+        self._last_sync_label.setText(f"{tr('settings.storage.last_sync')}: {last}")
+        cloud_key = (
+            "settings.storage.cloud_on" if sync.get("enabled") else "settings.storage.cloud_off"
+        )
+        self._cloud_label.setText(f"{tr('settings.storage.cloud')}: {tr(cloud_key)}")
+
+    def _on_save_cloud(self) -> None:
+        tr = self._translator.translate
+        url = self._cloud_url_edit.text().strip()
+        if not url.startswith("https://"):
+            self._cloud_result_label.setText(tr("settings.cloud.bad_url"))
+            return
+        key = self._cloud_key_edit.text()
+        if key:
+            try:
+                self._vault.set(SUPABASE_KEY_ENTRY, key)
+            except VaultError as exc:
+                self._cloud_result_label.setText(tr("settings.cloud.key_failed", error=str(exc)))
+                return
+            self._cloud_key_edit.clear()
+        save_cloud_url(url)
+        if self._storage is not None:
+            self._storage.apply_cloud_config()
+            self._storage.audit.cloud_config_changed(
+                {"url": url, "key": "changed" if key else "kept"}
+            )
+            self._refresh_storage_stats()
+        self._cloud_result_label.setText(tr("settings.cloud.saved"))
+
+    def _on_remove_key(self) -> None:
+        tr = self._translator.translate
+        try:
+            self._vault.delete(SUPABASE_KEY_ENTRY)
+        except VaultError as exc:
+            self._cloud_result_label.setText(tr("settings.cloud.key_failed", error=str(exc)))
+            return
+        save_cloud_url("")
+        if self._storage is not None:
+            self._storage.apply_cloud_config()
+            self._storage.audit.cloud_config_changed({"key": "removed"})
+            self._refresh_storage_stats()
+        self._cloud_result_label.setText(tr("settings.cloud.key_removed"))
+
+    def _on_test_cloud(self) -> None:
+        tr = self._translator.translate
+        if self._cloud_probe is not None:  # a test is already running
+            return
+        url = self._cloud_url_edit.text().strip()
+        if not url.startswith("https://"):
+            self._cloud_result_label.setText(tr("settings.cloud.bad_url"))
+            return
+        key = self._cloud_key_edit.text()
+        if not key:
+            try:
+                key = self._vault.get(SUPABASE_KEY_ENTRY) or ""
+            except VaultError:
+                key = ""
+        if not key:
+            self._cloud_result_label.setText(tr("settings.cloud.no_key"))
+            return
+        self._cloud_probe = CloudProbe(url, key)
+        self._cloud_probe.start()
+        self._cloud_test_button.setEnabled(False)
+        self._cloud_result_label.setText(tr("settings.cloud.testing"))
+        self._poll_cloud_probe()
+
+    def _poll_cloud_probe(self) -> None:
+        if self._cloud_probe is None:
+            return
+        tr = self._translator.translate
+        state = self._cloud_probe.poll()
+        if not state.finished:
+            QTimer.singleShot(200, self._poll_cloud_probe)
+            return
+        self._cloud_probe = None
+        self._cloud_test_button.setEnabled(True)
+        key = "settings.cloud.test_ok" if state.ok else "settings.cloud.test_failed"
+        self._cloud_result_label.setText(tr(key, detail=state.detail))
+
     # -- retranslation ---------------------------------------------------------
     def retranslate(self) -> None:
         """Refresh all texts for the current language."""
@@ -320,3 +530,13 @@ class SettingsPage(QWidget):
             f"{tr('settings.python')}: {platform.python_version()} "
             f"({sys.platform}, {platform.machine()})"
         )
+
+        if self._storage is not None:
+            self._storage_title.setText(tr("settings.storage.title"))
+            self._cloud_url_label.setText(tr("settings.cloud.url"))
+            self._cloud_key_label.setText(tr("settings.cloud.key"))
+            self._cloud_url_edit.setPlaceholderText(tr("settings.cloud.url.placeholder"))
+            self._cloud_save_button.setText(tr("settings.cloud.save"))
+            self._cloud_test_button.setText(tr("settings.cloud.test"))
+            self._cloud_remove_button.setText(tr("settings.cloud.remove_key"))
+            self._refresh_storage_stats()

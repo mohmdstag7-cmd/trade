@@ -67,7 +67,9 @@ def build_trade_row(deal: object) -> dict[str, object]:
 class HistoryImporter:
     """Fetches deals through the gateway and imports them idempotently."""
 
-    def __init__(self, gateway: MT5Gateway, repo: TradeRepository, *, timeout_s: float = 30.0) -> None:
+    def __init__(
+        self, gateway: MT5Gateway, repo: TradeRepository, *, timeout_s: float = 30.0
+    ) -> None:
         self._gateway = gateway
         self._repo = repo
         self._timeout_s = timeout_s

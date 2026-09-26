@@ -31,7 +31,7 @@ from typing import Any
 
 from app.__version__ import __version__
 from app.observability.logger import init_logging
-from app.observability.paths import default_crash_reports_dir, default_logs_dir
+from app.observability.paths import default_crash_reports_dir, default_data_dir, default_logs_dir
 
 SELF_CHECK_OK = "SELF-CHECK OK"
 SELF_CHECK_FAIL = "SELF-CHECK FAIL"
@@ -345,6 +345,7 @@ def run_gui(debug: bool = False) -> int:
     from app.core.settings import UiSettings
     from app.observability import crash_handler
     from app.observability.logger import log_startup, shutdown_logging
+    from app.storage.service import StorageService
     from app.ui.i18n.translator import Translator
     from app.ui.main_window import MainWindow
     from app.ui.pages.logs import LogsPage
@@ -373,6 +374,21 @@ def run_gui(debug: bool = False) -> int:
     qt_app.setApplicationDisplayName(translator.translate("app.title"))
     qt_app.setLayoutDirection(translator.layout_direction())
 
+    # Storage opens before the window so the Settings card can show live stats.
+    storage: StorageService | None = None
+    try:
+        storage = StorageService(default_data_dir())
+        storage.open()
+        storage.audit.app_started(__version__)
+    except Exception as exc:
+        # Storage failures must never take the whole app down at startup.
+        import loguru
+
+        loguru.logger.opt(exception=True).error(
+            "storage: starting in local-safe mode failed: {}", exc
+        )
+        storage = None
+
     logs_page = LogsPage(translator, log_state.ring, log_state.logs_dir)
     window = MainWindow(
         bus=bus,
@@ -380,10 +396,14 @@ def run_gui(debug: bool = False) -> int:
         translator=translator,
         theme_manager=theme_manager,
         logs_page=logs_page,
+        storage=storage,
     )
     window.show()
     exit_code = qt_app.exec()
 
+    if storage is not None:
+        storage.audit.app_stopped(__version__)
+        storage.close()
     shutdown_logging()
     return exit_code
 
