@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versions are managed automatically by [release-please](https://github.com/googleapis/release-please)
 from Conventional Commits.
 
+## [0.6.0](https://github.com/mohmdstag7-cmd/trade/compare/v0.5.0...v0.6.0) (2026-09-26)
+
+
+### Features
+
+* Phase 5.5 — UI v2 (responsive shell) + in-app delta updates + persistent MT5 connect ([30cf7f5](https://github.com/mohmdstag7-cmd/trade/commit/30cf7f5bbe77ceb67ec80f4861b3b8d147102753))
+* **ui:** design system v2 — token QSS rewrite, icons, toasts, sidebar, empty states ([6557330](https://github.com/mohmdstag7-cmd/trade/commit/6557330fc6fbcd512637984162fc111659d3cd72))
+* **ui:** responsive shell v2, persistent MT5 connect, updates card ([010959c](https://github.com/mohmdstag7-cmd/trade/commit/010959c0805c5d36fd148029db1c7e7efc030011))
+* **updater:** manifest-verified delta updates over GitHub release assets ([e4d65c9](https://github.com/mohmdstag7-cmd/trade/commit/e4d65c9214c224be842f8e2c788bf0aa4ebf4167))
+
 ## [0.5.0](https://github.com/mohmdstag7-cmd/trade/compare/v0.4.1...v0.5.0) (2026-09-26)
 
 
