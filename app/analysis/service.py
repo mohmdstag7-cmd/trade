@@ -178,6 +178,9 @@ class MarketAnalysisService:
         self._select_futures: dict[str, Future] = {}
         self._resolved_once = False
         self._fetch_failures: dict[str, int] = {}
+        # symbols whose first successful fetch batch has been announced in
+        # the log this session (cleared on disconnect/invalidate)
+        self._announced_ready: set[str] = set()
 
     # -- public API ---------------------------------------------------------------
     @property
@@ -207,6 +210,7 @@ class MarketAnalysisService:
         self._spread_state.clear()
         self._resolved_once = False
         self._fetch_failures.clear()
+        self._announced_ready.clear()
         for symbol in self._watched:
             for tf in (*ANALYSIS_TIMEFRAMES, Timeframe.W1):
                 self.manager._series.pop((symbol, tf), None)
@@ -261,6 +265,21 @@ class MarketAnalysisService:
                             self._unresolved[canonical] = (
                                 f"not listed by this broker (looked for {canonical} + suffix)"
                             )
+                    # One-line resolution verdict: the Market page staying
+                    # empty used to be invisible in user-supplied logs.
+                    if self._mapping:
+                        detail = ", ".join(f"{c}→{b}" for c, b in self._mapping.items())
+                        log.info(
+                            "analysis: resolved {}/{} watched symbols ({})",
+                            len(self._mapping),
+                            len(self._watched),
+                            detail,
+                        )
+                    if self._unresolved:
+                        log.warning(
+                            "analysis: unresolved symbols: {}",
+                            ", ".join(sorted(self._unresolved)),
+                        )
                     for canonical, broker in self._mapping.items():
                         select_fn = getattr(gateway, "select_symbol", None)
                         if select_fn is None:
@@ -370,6 +389,13 @@ class MarketAnalysisService:
                 log.warning("analysis: symbol_info {} failed: {}", symbol, exc)
         self._fetch_failures[symbol] = 0
         self._pending.pop(symbol, None)
+        if symbol not in self._announced_ready:
+            self._announced_ready.add(symbol)
+            log.info(
+                "analysis: {} data ready across {} timeframes",
+                symbol,
+                len(pending.futures),
+            )
         return True
 
     def _note_fetch_failure(self, symbol: str, exc: Exception) -> None:

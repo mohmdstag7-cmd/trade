@@ -87,8 +87,12 @@ class MT5Gateway:
         heartbeat: HeartbeatFn | None = None,
         on_state_change: StateCallback | None = None,
         time_fn: Callable[[], float] = time.monotonic,
+        name: str = "",
     ) -> None:
         self._mt5_factory = mt5_factory or _default_mt5_factory
+        # Disambiguates log lines when several gateways live in one process
+        # (the app shell's shared gateway + Settings-page one-shot probes).
+        self._name = name or "gw"
         self._request_timeout_s = request_timeout_s
         self._auto_reconnect = auto_reconnect
         self._reconnect_initial_s = reconnect_initial_s
@@ -122,7 +126,7 @@ class MT5Gateway:
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._run, name="mt5-gateway", daemon=True)
         self._thread.start()
-        log.info("gateway: started")
+        log.info("gateway[{}]: started", self._name)
 
     def stop(self, timeout_s: float = 5.0) -> None:
         """Stop the worker, release the terminal session, fail pending commands."""
@@ -131,8 +135,19 @@ class MT5Gateway:
         self._stop_event.set()
         self._queue.put(None)  # wake the worker so it sees the stop flag
         self._thread.join(timeout=timeout_s)
+        if self._thread.is_alive():
+            # A long initialize() can outlive the join. The worker will exit
+            # on its own eventually; until then the stop flag keeps new
+            # commands failing fast, but this instance must not be reused
+            # for start() until the thread actually dies.
+            log.warning(
+                "gateway[{}]: worker did not exit within {:.0f}s — a slow "
+                "terminal call is still draining",
+                self._name,
+                timeout_s,
+            )
         self._thread = None
-        log.info("gateway: stopped")
+        log.info("gateway[{}]: stopped", self._name)
 
     # ------------------------------------------------------------------ #
     # public API — enqueue only, never touch MT5 on the calling thread     #
@@ -268,7 +283,7 @@ class MT5Gateway:
             self._execute(operation, fn, future)
         self._drain_queue()
         self._teardown_session()
-        log.debug("gateway: worker exited")
+        log.debug("gateway[{}]: worker exited", self._name)
 
     def _drain_queue(self) -> None:
         while True:
@@ -312,7 +327,9 @@ class MT5Gateway:
             try:
                 self._heartbeat_fn()
             except Exception:  # pragma: no cover - heartbeat must never kill the worker
-                log.opt(exception=True).warning("gateway: heartbeat callback failed")
+                log.opt(exception=True).warning(
+                    "gateway[{}]: heartbeat callback failed", self._name
+                )
 
     # -- connection management ---------------------------------------------
     def _set_state(self, new_state: ConnectionState) -> None:
@@ -320,13 +337,13 @@ class MT5Gateway:
             return
         self._state = new_state
         self._stats.state_history.append(f"{new_state.value}@{int(self._time_fn())}")
-        log.info("gateway: state -> {}", new_state.value)
+        log.info("gateway[{}]: state -> {}", self._name, new_state.value)
         callback = self._on_state_change
         if callback is not None:
             try:
                 callback(new_state)
             except Exception:  # pragma: no cover - defensive
-                log.opt(exception=True).warning("gateway: state callback failed")
+                log.opt(exception=True).warning("gateway[{}]: state callback failed", self._name)
 
     def _module_or_fail(self) -> Any:
         """Lazily import/obtain the MT5 module on the worker thread."""
@@ -351,7 +368,7 @@ class MT5Gateway:
         }
         if request.terminal_path:
             kwargs["path"] = request.terminal_path
-        log.info("gateway: connecting {}", request.masked())
+        log.info("gateway[{}]: connecting {}", self._name, request.masked())
         try:
             ok = bool(module.initialize(**kwargs))
             if not ok:
@@ -378,7 +395,8 @@ class MT5Gateway:
         self._reconnect_delay_s = self._reconnect_initial_s
         self._set_state(ConnectionState.CONNECTED)
         log.info(
-            "gateway: connected login={} server={} mode={} balance={:.2f} {}",
+            "gateway[{}]: connected login={} server={} mode={} balance={:.2f} {}",
+            self._name,
             _mask_login(snapshot.login),
             snapshot.server,
             snapshot.mode_name,
@@ -393,27 +411,29 @@ class MT5Gateway:
             try:
                 self._module.shutdown()
             except Exception:  # pragma: no cover - shutdown must never raise
-                log.opt(exception=True).debug("gateway: shutdown() raised")
+                log.opt(exception=True).debug("gateway[{}]: shutdown() raised", self._name)
         was_connected = self._state is ConnectionState.CONNECTED
         self._account = None
         self._request = None
         self._set_state(ConnectionState.DISCONNECTED)
         if was_connected:
-            log.info("gateway: session closed")
+            log.info("gateway[{}]: session closed", self._name)
 
     def _enter_reconnecting(self, exc: ConnectionLostError) -> None:
         if not self._auto_reconnect:
-            log.warning("gateway: connection lost, auto-reconnect disabled ({})", exc)
+            log.warning(
+                "gateway[{}]: connection lost, auto-reconnect disabled ({})", self._name, exc
+            )
             self._teardown_session()
             return
         if self._request is None:
             # Never had a session (command fired before connect) — nothing to re-establish.
-            log.warning("gateway: command rejected while disconnected ({})", exc)
+            log.warning("gateway[{}]: command rejected while disconnected ({})", self._name, exc)
             return
         self._reconnect_delay_s = self._reconnect_initial_s
         self._next_reconnect_at = self._time_fn() + self._reconnect_delay_s
         self._set_state(ConnectionState.RECONNECTING)
-        log.warning("gateway: connection lost ({}), reconnecting…", exc)
+        log.warning("gateway[{}]: connection lost ({}), reconnecting…", self._name, exc)
 
     def _poll_reconnect(self) -> None:
         now = self._time_fn()
@@ -440,7 +460,8 @@ class MT5Gateway:
             # re-arm RECONNECTING so the loop keeps trying.
             self._set_state(ConnectionState.RECONNECTING)
             log.warning(
-                "gateway: reconnect attempt failed ({}) — next try in {:.1f}s",
+                "gateway[{}]: reconnect attempt failed ({}) — next try in {:.1f}s",
+                self._name,
                 exc,
                 self._reconnect_delay_s,
             )

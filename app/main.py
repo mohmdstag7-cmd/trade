@@ -257,7 +257,7 @@ def run_mt5_trade_test(args: argparse.Namespace) -> int:
         return 2
     login, server, password = creds
 
-    gateway = MT5Gateway(mt5_factory=_import_mt5, request_timeout_s=30.0)
+    gateway = MT5Gateway(mt5_factory=_import_mt5, request_timeout_s=30.0, name="cli")
     gateway.start()
     try:
         account = gateway.wait_for_result(
@@ -359,7 +359,10 @@ def _build_market_service(bus: Any) -> tuple[Any, Any | None]:
     gateway: MT5Gateway | None = None
     try:
         gateway = MT5Gateway(
-            mt5_factory=_import_mt5, request_timeout_s=30.0, on_state_change=_mirror_state
+            mt5_factory=_import_mt5,
+            request_timeout_s=30.0,
+            on_state_change=_mirror_state,
+            name="shared",
         )
         gateway.start()
     except Exception:  # pragma: no cover - never block startup on MT5
