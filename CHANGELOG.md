@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versions are managed automatically by [release-please](https://github.com/googleapis/release-please)
 from Conventional Commits.
 
+## [0.2.1](https://github.com/mohmdstag7-cmd/trade/compare/v0.2.0...v0.2.1) (2026-09-26)
+
+
+### Bug Fixes
+
+* **build:** bundle numpy for MetaTrader5 and repair build.yml branch filter ([3ecb7e3](https://github.com/mohmdstag7-cmd/trade/commit/3ecb7e346aaecca1d93c94cba45eb03693177f3c))
+
 ## [0.2.0](https://github.com/mohmdstag7-cmd/trade/compare/v0.1.0...v0.2.0) (2026-09-26)
 
 
