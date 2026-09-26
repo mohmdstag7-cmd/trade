@@ -181,3 +181,127 @@ class TestServicePipeline:
         assert snap.card.next_event is not None
         assert snap.card.next_event.title == "CPI y/y"
         assert snap.card.verdict == "wait"  # high-impact risk window
+
+
+class FakeResolvingGateway(FakeGateway):
+    """FakeGateway that also lists decorated broker symbols (resolution path)."""
+
+    def __init__(
+        self,
+        *,
+        connected: bool = True,
+        available: tuple[str, ...] = ("EURUSD.m", "GBPUSD.m", "XAUUSD.m"),
+    ) -> None:
+        super().__init__(connected=connected)
+        self.available = available
+        self.selected: list[str] = []
+        self.fetched: list[str] = []
+        self.names_calls = 0
+
+    def symbol_names(self) -> Future:
+        self.names_calls += 1
+        return _done(self.available)
+
+    def select_symbol(self, symbol: str) -> Future:
+        self.selected.append(symbol)
+        return _done(True)
+
+    def rates_from_pos(self, symbol: str, timeframe: str, start_pos: int, count: int):
+        self.fetched.append(symbol)
+        return super().rates_from_pos(symbol, timeframe, start_pos, count)
+
+    def tick(self, symbol: str) -> Future:
+        self.fetched.append(symbol)
+        return super().tick(symbol)
+
+    def symbol_info(self, symbol: str) -> Future:
+        self.fetched.append(symbol)
+        return super().symbol_info(symbol)
+
+
+class TestBrokerSymbolResolution:
+    """Market data must use broker-decorated names (EURUSD.m), never crash
+    or stay silently empty when the broker decorates or drops a symbol."""
+
+    def _drive(self, service: MarketAnalysisService):
+        service.refresh_now()  # submits symbol_names
+        service.poll()  # resolves names, submits symbol_select
+        service.refresh_now()  # drains selects, submits fetch batches
+        return service.poll()  # drains batches, computes snapshot
+
+    def test_suffix_resolved_and_used_for_fetches(self) -> None:
+        gateway = FakeResolvingGateway()
+        service = MarketAnalysisService(gateway, watched=("EURUSD", "GBPUSD", "XAUUSD"))
+
+        snapshot = self._drive(service)
+
+        assert snapshot is not None
+        assert gateway.selected == ["EURUSD.m", "GBPUSD.m", "XAUUSD.m"]
+        assert "EURUSD.m" in gateway.fetched
+        assert "EURUSD" not in gateway.fetched
+        assert snapshot.unresolved == ()
+        assert {s.symbol for s in snapshot.symbols} == {"EURUSD", "GBPUSD", "XAUUSD"}
+
+    def test_unresolved_symbol_surfaced_not_fatal(self) -> None:
+        gateway = FakeResolvingGateway(available=("EURUSD.m", "GBPUSD.m"))
+        service = MarketAnalysisService(gateway, watched=("EURUSD", "XAUUSD"))
+
+        snapshot = self._drive(service)
+
+        assert snapshot is not None
+        assert snapshot.unresolved == ("XAUUSD",)
+        assert {s.symbol for s in snapshot.symbols} == {"EURUSD"}
+        assert gateway.fetch_calls > 0  # the resolvable symbol still flows
+
+    def test_state_property_shape_blocks_offline(self) -> None:
+        # the real gateway exposes `state` as a @property (enum instance),
+        # NOT a method — the service must handle that shape too.
+        gateway = FakeResolvingGateway()
+        gateway.state = ConnectionState.DISCONNECTED
+        service = MarketAnalysisService(gateway, watched=("EURUSD",))
+
+        service.refresh_now()
+
+        assert gateway.fetch_calls == 0
+        assert service.poll() is None  # stays fully offline
+
+        gateway.state = ConnectionState.CONNECTED
+        snapshot = self._drive(service)
+        assert snapshot is not None
+        assert gateway.fetch_calls > 0
+
+    def test_invalidate_on_disconnect_reresolves(self) -> None:
+        gateway = FakeResolvingGateway()
+        service = MarketAnalysisService(gateway, watched=("EURUSD", "GBPUSD", "XAUUSD"))
+        self._drive(service)
+        assert gateway.names_calls == 1
+
+        service.invalidate_symbols()
+        assert service.snapshot is None
+        assert not service.manager.symbols()
+
+        snapshot = self._drive(service)
+        assert gateway.names_calls == 2  # fresh resolution pass
+        assert snapshot is not None
+        assert {s.symbol for s in snapshot.symbols} == {"EURUSD", "GBPUSD", "XAUUSD"}
+
+    def test_dead_symbol_parked_after_repeated_failures(self) -> None:
+        class DeadSymbolGateway(FakeResolvingGateway):
+            def rates_from_pos(self, symbol: str, timeframe: str, start_pos: int, count: int):
+                if symbol.endswith(".dead"):
+                    future: Future = Future()
+                    future.set_exception(RuntimeError("no history for symbol"))
+                    return future
+                return super().rates_from_pos(symbol, timeframe, start_pos, count)
+
+        gateway = DeadSymbolGateway(available=("EURUSD.dead", "GBPUSD.m"))
+        service = MarketAnalysisService(gateway, watched=("EURUSD", "GBPUSD"))
+
+        snapshot = None
+        for _ in range(5):
+            service.refresh_now()
+            snapshot = service.poll()
+
+        assert snapshot is not None
+        assert "EURUSD" in snapshot.unresolved  # parked after 3 failures
+        assert {s.symbol for s in snapshot.symbols} == {"GBPUSD"}

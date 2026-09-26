@@ -144,3 +144,29 @@ class TestTestConnection:
             "Login failed" in page._result_label.text()
             or "ورود ناموفق" in page._result_label.text()
         )
+
+
+class TestServerFieldHint:
+    """A password pasted into the Server field burns a silent timeout —
+    the live hint catches the slip before Connect."""
+
+    def test_password_like_server_shows_hint(
+        self, translator, theme_manager, account, keyring_module, qtbot
+    ) -> None:
+        page = make_page(translator, theme_manager, account, keyring_module, qtbot)
+        page._server_edit.setText("rH&5X6!w")
+        assert not page._server_hint.isHidden()
+
+    def test_normal_server_keeps_hint_hidden(
+        self, translator, theme_manager, account, keyring_module, qtbot
+    ) -> None:
+        page = make_page(translator, theme_manager, account, keyring_module, qtbot)
+        page._server_edit.setText("FIBOGroup-MT5 Server")
+        assert page._server_hint.isHidden()
+
+    def test_empty_field_keeps_hint_hidden(
+        self, translator, theme_manager, account, keyring_module, qtbot
+    ) -> None:
+        page = make_page(translator, theme_manager, account, keyring_module, qtbot)
+        page._server_edit.setText("")
+        assert page._server_hint.isHidden()

@@ -23,7 +23,7 @@ import math
 import time
 from concurrent.futures import Future
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
 from app.analysis import patterns as patterns_mod
 from app.analysis import structure as structure_mod
@@ -53,6 +53,7 @@ from app.calendar.importer import ExporterFilePoller
 from app.core.timeframes import ANALYSIS_TIMEFRAMES, Timeframe
 from app.mt5.models import RateBar, TickSnapshot
 from app.mt5.models import SymbolSnapshot as Mt5SymbolInfo
+from app.mt5.symbols import SymbolResolver
 from app.observability.logger import get_logger
 
 log = get_logger("sync")
@@ -68,6 +69,9 @@ FETCH_COUNTS: dict[Timeframe, int] = {
 
 DEFAULT_WATCHED: tuple[str, ...] = ("EURUSD", "GBPUSD", "XAUUSD")
 
+#: consecutive failed fetch batches before a symbol is parked as unusable
+_MAX_FETCH_FAILURES = 3
+
 
 class MarketDataGateway(Protocol):
     """The slice of the gateway the analysis service needs."""
@@ -77,6 +81,10 @@ class MarketDataGateway(Protocol):
     def tick(self, symbol: str) -> Future: ...
 
     def symbol_info(self, symbol: str) -> Future: ...
+
+    def symbol_names(self) -> Future: ...
+
+    def select_symbol(self, symbol: str) -> Future: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +119,8 @@ class MarketSnapshot:
     correlation: CorrelationMatrix | None
     strength: tuple[tuple[str, float], ...]
     scan: tuple[ScanEntry, ...]
+    #: canonical names this broker does not list (suffix resolution failed)
+    unresolved: tuple[str, ...] = ()
 
     def by_symbol(self, symbol: str) -> SymbolSnapshot | None:
         for s in self.symbols:
@@ -159,6 +169,15 @@ class MarketAnalysisService:
         self._symbol_snapshots: dict[str, SymbolSnapshot] = {}
         self._spread_state: dict[str, tuple[float | None, float | None, bool]] = {}
         self.last_refresh_monotonic = 0.0
+        # -- broker symbol resolution (canonical -> decorated name) ----------
+        self._resolver = SymbolResolver()
+        self._mapping: dict[str, str] = {}
+        self._ready: set[str] = set()
+        self._unresolved: dict[str, str] = {}
+        self._resolve_future: Future | None = None
+        self._select_futures: dict[str, Future] = {}
+        self._resolved_once = False
+        self._fetch_failures: dict[str, int] = {}
 
     # -- public API ---------------------------------------------------------------
     @property
@@ -168,26 +187,128 @@ class MarketAnalysisService:
     def has_pending(self) -> bool:
         return bool(self._pending)
 
+    def invalidate_symbols(self) -> None:
+        """Drop broker symbol mapping and all cached analysis.
+
+        Called when the gateway drops its session: the next connect may be a
+        different broker account with different symbol decorations, and the
+        cached bars would silently mix two price feeds.
+        """
+        self._resolver.invalidate()
+        self._mapping.clear()
+        self._ready.clear()
+        self._unresolved.clear()
+        self._resolve_future = None
+        self._select_futures.clear()
+        self._pending.clear()
+        self._last_bar_time.clear()
+        self._symbol_snapshots.clear()
+        self._snapshot = None
+        self._spread_state.clear()
+        self._resolved_once = False
+        self._fetch_failures.clear()
+        for symbol in self._watched:
+            for tf in (*ANALYSIS_TIMEFRAMES, Timeframe.W1):
+                self.manager._series.pop((symbol, tf), None)
+
+    # -- symbol resolution ---------------------------------------------------------
+    def _gateway_state_connected(self, gateway: Any) -> bool | None:
+        """True/False from ``gateway.state``; ``None`` when not exposed.
+
+        The real gateway exposes ``state`` as a property (an enum instance);
+        some test fakes expose it as a method. Accept both shapes.
+        """
+        raw = getattr(gateway, "state", None)
+        if raw is None:
+            return None
+        from app.mt5.models import ConnectionState
+
+        state = raw() if callable(raw) else raw
+        return state is ConnectionState.CONNECTED
+
+    def _pump_resolution(self, gateway: Any) -> set[str]:
+        """Drive symbol_names -> resolve -> select_symbol until ready.
+
+        Returns the canonical symbols that became ready in this call (the
+        caller submits their first fetch batches immediately). Runs exactly
+        one resolution pass per session; afterwards failures are surfaced
+        via ``_unresolved`` instead of re-querying forever.
+        """
+        if not self._mapping and not self._resolved_once:
+            names_fn = getattr(gateway, "symbol_names", None)
+            if names_fn is None:
+                # Legacy fake gateway without resolution support: assume the
+                # canonical names are exact broker names (old behaviour).
+                self._mapping = {s: s for s in self._watched}
+                self._ready = set(self._watched)
+                self._resolved_once = True
+                return set(self._ready)
+            if self._resolve_future is None or self._resolve_future.done():
+                if self._resolve_future is None:
+                    self._resolve_future = names_fn()
+                else:
+                    try:
+                        names = self._resolve_future.result()
+                    except Exception as exc:
+                        log.warning("analysis: symbol_names failed: {}", exc)
+                        names = ()
+                    self._resolve_future = None
+                    self._resolved_once = True
+                    resolved = self._resolver.resolve_all(self._watched, names)
+                    self._mapping.update({c: r.broker_symbol for c, r in resolved.items()})
+                    for canonical in self._watched:
+                        if canonical not in resolved:
+                            self._unresolved[canonical] = (
+                                f"not listed by this broker (looked for {canonical} + suffix)"
+                            )
+                    for canonical, broker in self._mapping.items():
+                        select_fn = getattr(gateway, "select_symbol", None)
+                        if select_fn is None:
+                            self._ready.add(canonical)
+                        else:
+                            self._select_futures[canonical] = select_fn(broker)
+            return set()
+        newly_ready: set[str] = set()
+        for canonical in list(self._select_futures):
+            future = self._select_futures[canonical]
+            if not future.done():
+                continue
+            del self._select_futures[canonical]
+            try:
+                future.result()
+                self._ready.add(canonical)
+                newly_ready.add(canonical)
+            except Exception as exc:
+                log.warning("analysis: symbol_select {} failed: {}", canonical, exc)
+                self._mapping.pop(canonical, None)
+                self._unresolved[canonical] = str(exc) or "symbol_select failed"
+        return newly_ready
+
     def refresh_now(self) -> None:
         """Submit fetch batches for every watched symbol (non-blocking)."""
         gateway = self._gateway
         if gateway is None:
             return
-        state = getattr(gateway, "state", None)
-        if callable(state):
-            from app.mt5.models import ConnectionState
-
-            if state() is not ConnectionState.CONNECTED:
-                return  # offline: the page shows its empty state
+        connected = self._gateway_state_connected(gateway)
+        if connected is False:
+            return  # offline: the page shows its empty state
         self.last_refresh_monotonic = float(self._mono())
-        for symbol in self._watched:
+        self._pump_resolution(gateway)
+        self._submit_ready_batches(gateway)
+
+    def _submit_ready_batches(self, gateway: Any) -> None:
+        """Queue a fetch batch per resolved symbol that has none in flight."""
+        for symbol in self._ready:
+            if symbol in self._pending:
+                continue
+            broker = self._mapping.get(symbol, symbol)
             pending = _Pending(symbol)
             for tf in (*ANALYSIS_TIMEFRAMES, Timeframe.W1):
                 pending.futures[(tf.gateway, FETCH_COUNTS[tf])] = gateway.rates_from_pos(
-                    symbol, tf.gateway, 0, FETCH_COUNTS[tf]
+                    broker, tf.gateway, 0, FETCH_COUNTS[tf]
                 )
-            pending.tick_future = gateway.tick(symbol)
-            pending.info_future = gateway.symbol_info(symbol)
+            pending.tick_future = gateway.tick(broker)
+            pending.info_future = gateway.symbol_info(broker)
             self._pending[symbol] = pending
 
     def poll(self) -> MarketSnapshot | None:
@@ -196,6 +317,12 @@ class MarketAnalysisService:
             added, _errors = self.calendar_poller.poll(float(self._mono()))
             if added:
                 self._recompute_all(force=True)
+        if self._gateway is not None and self._gateway_state_connected(self._gateway) is not False:
+            newly_ready = self._pump_resolution(self._gateway)
+            if newly_ready:
+                # resolution just completed — don't wait for the next
+                # refresh tick (up to a minute of an empty Market page)
+                self._submit_ready_batches(self._gateway)
         if not self._pending:
             return self._snapshot
         for symbol in list(self._pending):
@@ -221,6 +348,7 @@ class MarketAnalysisService:
             except Exception as exc:  # gateway errors surface in the UI elsewhere
                 log.warning("analysis: fetch {} {} failed: {}", symbol, tf.value, exc)
                 self._pending.pop(symbol, None)
+                self._note_fetch_failure(symbol, exc)
                 return False
             issues = self._ingest_closed(symbol, tf, bars, count)
             if any(i.kind == SanityIssueKind.SPIKE for i in issues):
@@ -240,8 +368,25 @@ class MarketAnalysisService:
                 self._digits[symbol] = int(info.digits)
             except Exception as exc:
                 log.warning("analysis: symbol_info {} failed: {}", symbol, exc)
+        self._fetch_failures[symbol] = 0
         self._pending.pop(symbol, None)
         return True
+
+    def _note_fetch_failure(self, symbol: str, exc: Exception) -> None:
+        """Escalate a symbol to 'unresolved' after repeated dead fetches.
+
+        A listed-but-empty symbol (no history, refused select) would otherwise
+        retry forever, spamming the log every refresh cycle.
+        """
+        failures = self._fetch_failures.get(symbol, 0) + 1
+        self._fetch_failures[symbol] = failures
+        if failures < _MAX_FETCH_FAILURES:
+            return
+        detail = str(exc) or type(exc).__name__
+        log.warning("analysis: {} disabled after {} failed fetches ({})", symbol, failures, detail)
+        self._ready.discard(symbol)
+        self._mapping.pop(symbol, None)
+        self._unresolved[symbol] = detail
 
     def _ingest_closed(
         self, symbol: str, tf: Timeframe, bars: tuple[RateBar, ...], count: int
@@ -448,6 +593,7 @@ class MarketAnalysisService:
             correlation=correlation,
             strength=tuple(sorted(strength_scores.items(), key=lambda kv: kv[1], reverse=True)),
             scan=tuple(scan),
+            unresolved=tuple(self._unresolved),
         )
 
 
