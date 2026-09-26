@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mt5-trading-workstation"
-version = "0.2.1"
+version = "0.3.0"
 description = "MT5 Trading Workstation: market analysis, calibrated win probability, risk-controlled execution on MetaTrader 5."
 readme = "README.md"
 requires-python = ">=3.11,<3.12"

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versions are managed automatically by [release-please](https://github.com/googleapis/release-please)
 from Conventional Commits.
 
+## [0.3.0](https://github.com/mohmdstag7-cmd/trade/compare/v0.2.1...v0.3.0) (2026-09-26)
+
+
+### Features
+
+* **mt5:** single-threaded MT5 gateway with diagnostics and demo trade test ([b6942e4](https://github.com/mohmdstag7-cmd/trade/commit/b6942e47f9214516a04180d1cc1cd1a46a946619))
+
 ## [0.2.1](https://github.com/mohmdstag7-cmd/trade/compare/v0.2.0...v0.2.1) (2026-09-26)
 
 
