@@ -69,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     size_kb = args.out.stat().st_size / 1024
     print(
-        f"delta: {written} changed, {len(diff.removed)} removed → "
+        f"delta: {written} changed, {len(diff.removed)} removed -> "
         f"{args.out.name} ({size_kb:.0f} KB)"
     )
     return 0

@@ -35,7 +35,7 @@ def main(argv: list[str] | None = None) -> int:
     manifest["generated_at"] = dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     target = tree / MANIFEST_NAME
     target.write_text(json.dumps(manifest, indent=1), encoding="utf-8")
-    print(f"manifest: {len(manifest['files'])} files → {target}")
+    print(f"manifest: {len(manifest['files'])} files -> {target}")
     return 0
 
 
