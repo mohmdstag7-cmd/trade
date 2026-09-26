@@ -233,6 +233,12 @@ EN: dict[str, str] = {
     "updates.dev_mode": "Updates are available in the packaged app (portable / installer).",
     "updates.release_page": "Open releases page",
     "updates.corrupt": "The downloaded update failed verification and was discarded.",
+    "updates.resume_ready": "v{version} is already downloaded — click “Restart & install” to apply it.",
+    "updates.restarting": "Restarting to install v{version}…",
+    "updates.staged_missing": "The staged update is incomplete — run “Check for updates” again.",
+    "updates.last_failed": "The previous install attempt failed — v{version} is ready; click “Restart & install” to retry.",
+    "updates.restart_windows_only": "Automatic install works on Windows — download the portable zip from the releases page.",
+    "updates.elevated": "Windows may ask for administrator permission to install v{version}.",
 }
 
 FA: dict[str, str] = {
@@ -450,6 +456,12 @@ FA: dict[str, str] = {
     "updates.dev_mode": "به‌روزرسانی فقط در نسخه بسته‌بندی‌شده (portable / installer) فعال است.",
     "updates.release_page": "بازکردن صفحه انتشارها",
     "updates.corrupt": "فایل به‌روزرسانی دانلودشده تأیید نشد و کنار گذاشته شد.",
+    "updates.resume_ready": "نسخه v{version} قبلاً دانلود شده است — برای نصب روی «راه‌اندازی مجدد و نصب» بزنید.",
+    "updates.restarting": "برای نصب v{version} برنامه راه‌اندازی مجدد می‌شود…",
+    "updates.staged_missing": "به‌روزرسانی آماده‌شده ناقص است — دوباره «بررسی به‌روزرسانی» را اجرا کنید.",
+    "updates.last_failed": "تلاش قبلی برای نصب ناموفق بود — نسخه v{version} آماده است؛ برای تلاش دوباره روی «راه‌اندازی مجدد و نصب» بزنید.",
+    "updates.restart_windows_only": "نصب خودکار فقط در ویندوز کار می‌کند — فایل portable را از صفحه انتشارها دانلود کنید.",
+    "updates.elevated": "ویندوز ممکن است برای نصب v{version} اجازه مدیر (UAC) را درخواست کند.",
 }
 
 #: All string dictionaries, keyed by language code.

@@ -549,6 +549,7 @@ def run_gui(debug: bool = False) -> int:
     # Phase 6 conveniences: reconnect automatically, then ask for updates —
     # both after the window is visible so startup stays snappy.
     QTimer.singleShot(1500, lambda: _maybe_auto_connect(shared_gateway, bus))
+    QTimer.singleShot(2000, lambda: _resume_pending_update(window))
     if load_check_updates():
         QTimer.singleShot(4000, lambda: _startup_update_check(window))
 
@@ -559,6 +560,13 @@ def run_gui(debug: bool = False) -> int:
         storage.close()
     shutdown_logging()
     return exit_code
+
+
+def _resume_pending_update(window: Any) -> None:
+    """Surface an update staged by a previous session (no network, no re-download)."""
+    settings_page = window._pages.get("settings")
+    if settings_page is not None:
+        settings_page.resume_pending_update()
 
 
 def _startup_update_check(window: Any) -> None:
