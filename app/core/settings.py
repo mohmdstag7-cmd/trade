@@ -31,8 +31,24 @@ _KEY_MT5_LOGIN = "mt5/login"
 _KEY_MT5_SERVER = "mt5/server"
 _KEY_MT5_TERMINAL_PATH = "mt5/terminal_path"
 
-#: The password is NEVER stored here — only in Windows Credential Manager
-#: via :class:`app.mt5.credentials.CredentialStore` (SPEC C11, I-6).
+# -- Cloud mirror (Phase 4) ---------------------------------------------------
+_KEY_CLOUD_URL = "cloud/supabase_url"
+
+#: The Supabase service key is NEVER stored here — only in the OS vault
+#: via :class:`app.storage.vault.KeyringVault` (SPEC C11, I-6).
+
+
+def load_cloud_url() -> str:
+    """Configured Supabase project URL ('' when unset). Not a secret."""
+    qs = QSettings(_ORG, _APP)
+    return str(qs.value(_KEY_CLOUD_URL, "")).strip()
+
+
+def save_cloud_url(url: str) -> None:
+    """Persist the Supabase project URL (normalised without trailing slash)."""
+    qs = QSettings(_ORG, _APP)
+    qs.setValue(_KEY_CLOUD_URL, url.strip().rstrip("/"))
+    qs.sync()
 
 
 class UiSettings:

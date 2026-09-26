@@ -395,7 +395,6 @@ class MigrationRunner:
     def __init__(self, db: Database, migrations: tuple[Migration, ...] = MIGRATIONS) -> None:
         self._db = db
         self._migrations = sorted(migrations, key=lambda m: m.version)
-        self._ensure_ledger()
 
     def _ensure_ledger(self) -> None:
         self._db.execute(
@@ -407,6 +406,7 @@ class MigrationRunner:
 
     # -- state -----------------------------------------------------------------
     def applied_versions(self) -> list[int]:
+        self._ensure_ledger()
         rows = self._db.query("SELECT version FROM schema_migrations ORDER BY version")
         return [int(r["version"]) for r in rows]
 
