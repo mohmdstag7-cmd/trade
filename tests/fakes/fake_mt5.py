@@ -529,9 +529,7 @@ class FakeMetaTrader5:
             0,
         )
 
-    def history_deals_get(
-        self, date_from: Any = None, date_to: Any = None
-    ) -> tuple[_Deal, ...]:
+    def history_deals_get(self, date_from: Any = None, date_to: Any = None) -> tuple[_Deal, ...]:
         self._record("history_deals_get")
         self._maybe_fail()
         if not self.initialized:
