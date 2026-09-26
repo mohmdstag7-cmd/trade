@@ -11,7 +11,6 @@ import platform
 import re
 import subprocess
 import sys
-from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import Qt, QTimer
@@ -49,7 +48,12 @@ from app.storage.vault import KeyringVault, VaultError
 from app.ui.i18n.translator import Translator
 from app.ui.theme.manager import ThemeManager
 from app.ui.workers import ConnectWorker
-from app.updater.service import CheckResult, UpdateService
+from app.updater.service import (
+    CheckResult,
+    UpdateService,
+    app_dir_writable,
+    read_apply_log_tail,
+)
 from app.updater.worker import UpdateWorker
 
 _PROBE_POLL_MS = 150
@@ -385,25 +389,82 @@ class SettingsPage(QWidget):
             self._update_check_button.setEnabled(True)
 
     def _on_restart_and_install(self) -> None:
-        """Launch the apply script detached, then quit so it can swap files."""
-        if self._staged_version is None or os.name != "nt":
+        """Launch the apply script detached, then quit so it can swap files.
+
+        Never a silent no-op: every failure mode (staged version missing,
+        script missing, spawn error) lands a visible message on the
+        updates card — the old version returned silently and users kept
+        clicking a button that did nothing.
+        """
+        if self._staged_version is None:
+            return
+        if os.name != "nt":
+            self._update_status_label.setText(self._tr("updates.restart_windows_only"))
             return
         script = self._updater.apply_script_path(self._staged_version)
-        if script is None or not Path(script).is_file():
+        if not script.is_file():
+            self._update_status_label.setText(self._tr("updates.staged_missing"))
+            self._update_restart_button.setVisible(False)
+            self._update_check_button.setEnabled(True)
+            self._staged_version = None
             return
-        detached = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
-        subprocess.Popen(
-            [str(script)],
-            close_fds=True,
-            cwd=str(script.parent),
-            creationflags=detached,
-            shell=False,
+        self._update_status_label.setText(
+            self._tr("updates.restarting", version=self._staged_version)
         )
+        self._update_restart_button.setEnabled(False)
+        try:
+            if app_dir_writable(self._updater.app_dir):
+                subprocess.Popen(
+                    ["cmd.exe", "/c", str(script)],
+                    close_fds=True,
+                    cwd=str(script.parent),
+                    creationflags=0x00000008 | 0x00000200,
+                )
+            else:
+                # Installer install (e.g. Program Files): robocopy needs
+                # elevation, so relaunch the script via UAC.
+                path_text = str(script).replace("'", "''")
+                ps_command = f"Start-Process -FilePath '{path_text}' -Verb RunAs"
+                subprocess.Popen(
+                    ["powershell", "-NoProfile", "-Command", ps_command],
+                    close_fds=True,
+                    creationflags=0x00000008 | 0x00000200,
+                )
+                self._update_status_label.setText(
+                    self._tr("updates.elevated", version=self._staged_version)
+                )
+        except OSError as exc:
+            self._update_status_label.setText(self._tr("updates.failed", error=str(exc)))
+            self._update_restart_button.setEnabled(True)
+            return
         from PySide6.QtWidgets import QApplication
 
         app = QApplication.instance()
         if app is not None:
             app.quit()
+
+    def resume_pending_update(self) -> None:
+        """Offer an already-staged update after a restart (no re-download).
+
+        Called at startup, before any network access. A fully staged tree
+        (apply script + verified manifest) from a previous session is
+        surfaced as "ready to install" — previously the app silently
+        forgot about it and the user had to download the same delta all
+        over again.
+        """
+        if not self._updater.enabled:
+            return
+        version = self._updater.pending_staged_update()
+        if version is None:
+            return
+        self._staged_version = version
+        self._update_check_button.setEnabled(False)
+        self._update_restart_button.setEnabled(True)
+        self._update_restart_button.setVisible(True)
+        if "apply FAILED" in read_apply_log_tail(lines=50):
+            self._update_status_label.setText(self._tr("updates.last_failed", version=version))
+        else:
+            self._update_status_label.setText(self._tr("updates.resume_ready", version=version))
 
     def apply_check_result(self, result: CheckResult) -> None:
         """Reflect a startup check performed by the app shell."""

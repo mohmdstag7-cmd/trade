@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import sys
 import zipfile
 
 import pytest
@@ -190,6 +191,193 @@ def test_apply_script_waits_copies_and_restarts() -> None:
     assert 'robocopy "%STAGE%" "%APP_DIR%" /E' in payload
     assert 'start "" "%APP_DIR%\\MT5TradingWorkstation.exe"' in payload
     assert "old.dll" in payload and "ancient.pdb" in payload
+
+
+class TestApplyScriptRobustness:
+    """v0.6.2/0.6.3 downloaded updates but never installed them.
+
+    The old script waited with ``timeout /t 1``, which cannot run in the
+    detached (console-less) process the app spawns — the wait loop fell
+    through instantly, robocopy raced the still-running app, hit locked
+    files and gave up. These assertions pin the corrected behaviour.
+    """
+
+    def _payload(self, removed: tuple[str, ...] = ()) -> str:
+        return apply_script_payload(
+            pathlib.Path(r"C:\Apps\MT5TradingWorkstation"),
+            pathlib.Path(r"C:\Apps\MT5TradingWorkstation.update-0.6.0"),
+            pid=4242,
+            removed=removed,
+        )
+
+    def test_wait_loop_works_without_console(self) -> None:
+        payload = self._payload()
+        assert "timeout /t" not in payload  # dies instantly when detached
+        assert "ping -n 2 127.0.0.1 >nul" in payload  # console-free ~1s delay
+        assert "setlocal enabledelayedexpansion" in payload
+        # delayed expansion counter — %tries% never advances inside a block
+        assert "if !tries! GEQ 90 goto forcekill" in payload
+
+    def test_wedged_process_is_force_killed(self) -> None:
+        payload = self._payload()
+        assert "taskkill /PID %TARGET_PID% /F" in payload
+
+    def test_every_step_is_logged(self) -> None:
+        payload = self._payload()
+        assert "update-apply.log" in payload
+        assert 'robocopy "%STAGE%" "%APP_DIR%" /E /NFL /NDL /NJH /NJS /NP /R:2 /W:1 >> "%LOG%"' in payload
+        assert "robocopy exit=!rc!" in payload
+        assert "apply FAILED" in payload
+        assert "apply OK" in payload
+
+    def test_failure_keeps_staging_and_relaunches_old_exe(self) -> None:
+        payload = self._payload()
+        # both the success and the failure path must bring the app back up
+        assert payload.count('start "" "%APP_DIR%\\MT5TradingWorkstation.exe"') == 2
+        # the fail branch must come after the rc check and skip rmdir
+        fail_index = payload.index(":fail")
+        assert payload.index("if !rc! GEQ 8 goto fail") < fail_index
+        assert 'rmdir /s /q "%STAGE%"' in payload
+        assert payload.index('rmdir /s /q "%STAGE%"') < fail_index
+
+    def test_removed_paths_use_windows_separators(self) -> None:
+        payload = self._payload(removed=("sub/ancient.pdb",))
+        assert 'del /f /q "%APP_DIR%\\sub\\ancient.pdb"' in payload
+
+
+def test_ascii_safe_path_is_identity_off_windows(tmp_path: pathlib.Path) -> None:
+    from app.updater.service import ascii_safe_path
+
+    assert ascii_safe_path(tmp_path) == tmp_path
+
+
+def test_app_dir_writable_probe(tmp_path: pathlib.Path) -> None:
+    from app.updater.service import app_dir_writable
+
+    assert app_dir_writable(tmp_path)
+    assert not app_dir_writable(tmp_path / "does-not-exist")
+
+
+def test_read_apply_log_tail_off_windows() -> None:
+    from app.updater.service import read_apply_log_tail
+
+    # On non-Windows there is no log location; must return "" not raise.
+    if sys.platform == "win32":  # pragma: no cover - CI runs Linux
+        pytest.skip("log tail is Windows-specific")
+    assert read_apply_log_tail() == ""
+
+
+class TestPendingStagedUpdate:
+    """A staged update must survive a restart without re-downloading."""
+
+    def _staged(self, service: UpdateService, version: str) -> None:
+        staging = staging_root(service.app_dir, version)
+        staging.mkdir(parents=True, exist_ok=True)
+        (staging / "manifest.json").write_text(
+            json.dumps({"version": version, "files": {}}), encoding="utf-8"
+        )
+        service.apply_script_path(version).write_text("bat", encoding="ascii")
+
+    def test_complete_staging_is_detected(self, tmp_path: pathlib.Path) -> None:
+        service = _service(tmp_path, FakeFetcher())
+        self._staged(service, "0.6.0")
+        assert service.pending_staged_update() == "0.6.0"
+
+    def test_missing_script_is_ignored(self, tmp_path: pathlib.Path) -> None:
+        service = _service(tmp_path, FakeFetcher())
+        staging = staging_root(service.app_dir, "0.6.0")
+        staging.mkdir(parents=True)
+        (staging / "manifest.json").write_text(
+            json.dumps({"version": "0.6.0", "files": {}}), encoding="utf-8"
+        )
+        assert service.pending_staged_update() is None
+
+    def test_missing_staging_manifest_is_ignored(self, tmp_path: pathlib.Path) -> None:
+        service = _service(tmp_path, FakeFetcher())
+        service.apply_script_path("0.6.0").write_text("bat", encoding="ascii")
+        staging_root(service.app_dir, "0.6.0").mkdir()
+        assert service.pending_staged_update() is None
+
+    def test_version_mismatch_is_ignored(self, tmp_path: pathlib.Path) -> None:
+        service = _service(tmp_path, FakeFetcher())
+        self._staged(service, "0.6.0")
+        # manifest claims a different version than the script filename
+        staging = staging_root(service.app_dir, "0.6.0")
+        (staging / "manifest.json").write_text(
+            json.dumps({"version": "9.9.9", "files": {}}), encoding="utf-8"
+        )
+        assert service.pending_staged_update() is None
+
+    def test_not_newer_than_current_is_ignored(self, tmp_path: pathlib.Path) -> None:
+        service = _service(tmp_path, FakeFetcher(), version="0.7.0")
+        self._staged(service, "0.6.0")  # older than the running 0.7.0
+        assert service.pending_staged_update() is None
+
+
+class TestCleanupStaleArtifacts:
+    """Failed past attempts must not pile up next to the app folder."""
+
+    def test_old_staging_scripts_and_removed_lists_are_removed(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        service = _service(tmp_path, FakeFetcher())
+        parent = service.app_dir.parent
+        for version in ("0.5.8", "0.5.9", "0.6.0"):
+            staging_root(service.app_dir, version).mkdir(parents=True)
+            (parent / f"apply_update_{version}.bat").write_text("bat", encoding="ascii")
+            (parent / f".removed_{version}.txt").write_text("gone.dll", encoding="ascii")
+        service.cleanup_stale_artifacts(keep_version="0.6.0")
+        assert staging_root(service.app_dir, "0.5.8").exists() is False
+        assert staging_root(service.app_dir, "0.5.9").exists() is False
+        assert staging_root(service.app_dir, "0.6.0").exists()
+        assert (parent / "apply_update_0.6.0.bat").is_file()
+        assert (parent / ".removed_0.6.0.txt").is_file()
+        assert (parent / "apply_update_0.5.8.bat").exists() is False
+        assert (parent / ".removed_0.5.9.txt").exists() is False
+
+    def test_download_and_stage_cleans_before_staging(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("app.updater.service.UpdateService.enabled", property(lambda self: True))
+        app_dir = tmp_path / "MT5TradingWorkstation"
+        _make_tree(app_dir, {"app.exe": b"old"})
+        (app_dir / "manifest.json").write_text(
+            json.dumps(build_manifest(app_dir, "0.5.0")), encoding="utf-8"
+        )
+        stale = staging_root(app_dir, "0.5.5")
+        stale.mkdir()
+        (stale / "junk.txt").write_text("x", encoding="ascii")
+        new_tree = tmp_path / "new"
+        _make_tree(new_tree, {"app.exe": b"new"})
+        manifest_url = latest_manifest_url("test/repo")
+        remote = build_manifest(new_tree, "0.6.0")
+        delta_url = delta_zip_url("0.6.0", "0.5.0", "test/repo")
+        delta = _delta_zip(tmp_path, {"app.exe": b"new"}, [])
+        fetcher = FakeFetcher(manifests={manifest_url: remote}, zips={delta_url: delta})
+        service = _service(tmp_path, fetcher)
+        result = service.check()
+        assert result.plan is not None
+        service.download_and_stage(result.plan)
+        assert stale.exists() is False
+
+
+def test_write_apply_script_adds_chcp_for_non_ascii_paths(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When 8.3 short names cannot ASCII-fy the path, cmd must read UTF-8."""
+    service = _service(tmp_path, FakeFetcher())
+
+    def fake_ascii(path: pathlib.Path) -> pathlib.Path:
+        return pathlib.Path(str(path) + "نسخه")
+
+    monkeypatch.setattr("app.updater.service.ascii_safe_path", fake_ascii)
+    staging = staging_root(service.app_dir, "0.6.0")
+    staging.mkdir(parents=True)
+    plan = UpdatePlan(current_version="0.5.0", new_version="0.6.0", mode="delta", release_page="")
+    service._write_apply_script(plan, staging)
+    text = service.apply_script_path("0.6.0").read_text(encoding="utf-8")
+    assert "chcp 65001" in text
+    assert "نسخه" in text  # the non-ASCII path survived (not dropped)
 
 
 # -- service pipeline -----------------------------------------------------------------------
