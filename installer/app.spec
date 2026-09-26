@@ -14,7 +14,11 @@ a = Analysis(
     binaries=[],
     datas=[],
     hiddenimports=[
+        # MetaTrader5 ships as compiled .pyd modules: its runtime
+        # "import numpy" is invisible to PyInstaller static analysis, so
+        # numpy must be forced into the bundle explicitly.
         "MetaTrader5",
+        "numpy",
         "PySide6.QtCore",
         "PySide6.QtGui",
         "PySide6.QtWidgets",
