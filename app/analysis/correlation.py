@@ -68,10 +68,30 @@ def rolling_correlation(
 
 
 #: Common ISO currency codes treated as FX legs for the strength meter.
-ISO_CURRENCIES = frozenset({
-    "USD", "EUR", "GBP", "JPY", "CHF", "AUD", "NZD", "CAD", "SEK", "NOK",
-    "DKK", "PLN", "HUF", "CZK", "TRY", "MXN", "ZAR", "SGD", "HKD", "CNH",
-})
+ISO_CURRENCIES = frozenset(
+    {
+        "USD",
+        "EUR",
+        "GBP",
+        "JPY",
+        "CHF",
+        "AUD",
+        "NZD",
+        "CAD",
+        "SEK",
+        "NOK",
+        "DKK",
+        "PLN",
+        "HUF",
+        "CZK",
+        "TRY",
+        "MXN",
+        "ZAR",
+        "SGD",
+        "HKD",
+        "CNH",
+    }
+)
 
 
 def _currencies_of(symbol: str) -> tuple[str, str]:
