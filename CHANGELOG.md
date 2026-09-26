@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versions are managed automatically by [release-please](https://github.com/googleapis/release-please)
 from Conventional Commits.
 
+## [0.6.1](https://github.com/mohmdstag7-cmd/trade/compare/v0.6.0...v0.6.1) (2026-09-26)
+
+
+### Bug Fixes
+
+* **ci:** ASCII-only console output in release tools ([2d2b8d6](https://github.com/mohmdstag7-cmd/trade/commit/2d2b8d67b0f97b88c052ed639f07a133387e30cc))
+* **ci:** ASCII-only console output in release tools (Windows cp1252 runner) ([fdf2c8d](https://github.com/mohmdstag7-cmd/trade/commit/fdf2c8d0120b4714a728bb09bf83db675a763d0c))
+
 ## [0.6.0](https://github.com/mohmdstag7-cmd/trade/compare/v0.5.0...v0.6.0) (2026-09-26)
 
 
