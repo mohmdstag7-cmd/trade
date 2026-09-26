@@ -30,6 +30,10 @@ _KEY_SIDEBAR_COLLAPSED = "ui/sidebar_collapsed"
 _KEY_MT5_LOGIN = "mt5/login"
 _KEY_MT5_SERVER = "mt5/server"
 _KEY_MT5_TERMINAL_PATH = "mt5/terminal_path"
+_KEY_MT5_AUTO_CONNECT = "mt5/auto_connect"
+
+# -- Updates (Phase 6) ---------------------------------------------------------
+_KEY_CHECK_UPDATES = "ui/check_updates"
 
 # -- Cloud mirror (Phase 4) ---------------------------------------------------
 _KEY_CLOUD_URL = "cloud/supabase_url"
@@ -48,6 +52,19 @@ def save_cloud_url(url: str) -> None:
     """Persist the Supabase project URL (normalised without trailing slash)."""
     qs = QSettings(_ORG, _APP)
     qs.setValue(_KEY_CLOUD_URL, url.strip().rstrip("/"))
+    qs.sync()
+
+
+def load_check_updates() -> bool:
+    """Whether to ask for a newer release at startup (default: on)."""
+    qs = QSettings(_ORG, _APP)
+    return bool(qs.value(_KEY_CHECK_UPDATES, True, type=bool))
+
+
+def save_check_updates(value: bool) -> None:
+    """Persist the startup update-check preference."""
+    qs = QSettings(_ORG, _APP)
+    qs.setValue(_KEY_CHECK_UPDATES, value)
     qs.sync()
 
 
@@ -100,6 +117,17 @@ class UiSettings:
     @sidebar_collapsed.setter
     def sidebar_collapsed(self, value: bool) -> None:
         self._qs.setValue(_KEY_SIDEBAR_COLLAPSED, value)
+        self._qs.sync()
+
+    # -- updates ------------------------------------------------------------
+    @property
+    def check_updates_on_startup(self) -> bool:
+        """Whether the app asks GitHub for a newer release at startup."""
+        return bool(self._qs.value(_KEY_CHECK_UPDATES, True, type=bool))
+
+    @check_updates_on_startup.setter
+    def check_updates_on_startup(self, value: bool) -> None:
+        self._qs.setValue(_KEY_CHECK_UPDATES, value)
         self._qs.sync()
 
     # -- maintenance ------------------------------------------------------
@@ -162,6 +190,17 @@ class Mt5AccountSettings:
     @terminal_path.setter
     def terminal_path(self, value: str) -> None:
         self._qs.setValue(_KEY_MT5_TERMINAL_PATH, value.strip())
+        self._qs.sync()
+
+    # -- auto connect ----------------------------------------------------------
+    @property
+    def auto_connect(self) -> bool:
+        """Connect with the saved account automatically at startup."""
+        return bool(self._qs.value(_KEY_MT5_AUTO_CONNECT, True, type=bool))
+
+    @auto_connect.setter
+    def auto_connect(self, value: bool) -> None:
+        self._qs.setValue(_KEY_MT5_AUTO_CONNECT, value)
         self._qs.sync()
 
     # -- helpers ---------------------------------------------------------------

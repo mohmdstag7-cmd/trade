@@ -1,11 +1,17 @@
-"""Main window: sidebar + stacked pages + status bar + command palette."""
+"""Main window: sidebar + stacked pages + status bar + command palette + toasts.
+
+v2 (Phase 6): window geometry/maximized state persists across sessions,
+a toast host overlays transient notifications, the shared gateway's live
+connection state reaches the status bar, and every page receives the
+theme manager for icon theming.
+"""
 
 from __future__ import annotations
 
 from functools import partial
 from typing import Any
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QByteArray, QSettings, Qt
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -25,6 +31,16 @@ from app.ui.theme.manager import ThemeManager
 from app.ui.widgets.command_palette import Command, CommandPalette
 from app.ui.widgets.sidebar import Sidebar
 from app.ui.widgets.status_bar import StatusBar
+from app.ui.widgets.toast import ToastHost
+
+_ORG = "MT5TradingWorkstation"
+_APP = "workstation"
+_KEY_GEOMETRY = "ui/geometry"
+_KEY_WINDOW_STATE = "ui/window_state"
+
+#: Comfortable default; the stored geometry takes precedence when present.
+_DEFAULT_SIZE = (1320, 840)
+_MIN_SIZE = (1020, 640)
 
 
 class MainWindow(QMainWindow):
@@ -44,6 +60,7 @@ class MainWindow(QMainWindow):
         *,
         storage: Any | None = None,
         market_analysis: Any | None = None,
+        shared_gateway: Any | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("MainWindow")
@@ -54,10 +71,11 @@ class MainWindow(QMainWindow):
         self._logs_page = logs_page
         self._storage = storage
         self._market_analysis = market_analysis
+        self._shared_gateway = shared_gateway
 
         self.setWindowTitle(translator.translate("app.title"))
-        self.setMinimumSize(1024, 640)
-        self.resize(1280, 800)
+        self.setMinimumSize(*_MIN_SIZE)
+        self.resize(*_DEFAULT_SIZE)
 
         # -- central layout: sidebar + pages ---------------------------------
         central = QWidget()
@@ -66,14 +84,19 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        self._sidebar = Sidebar(translator, settings, self)
+        self._sidebar = Sidebar(translator, settings, self, theme_manager=theme_manager)
         self._stack = QStackedWidget(central)
 
         self._pages: dict[str, QWidget] = {}
         for meta in PAGES:
             if meta.key == "settings":
                 page: QWidget = SettingsPage(
-                    translator, theme_manager, self, bus=bus, storage=storage
+                    translator,
+                    theme_manager,
+                    self,
+                    bus=bus,
+                    storage=storage,
+                    shared_gateway=shared_gateway,
                 )
             elif meta.key == "logs" and logs_page is not None:
                 page = logs_page
@@ -87,7 +110,7 @@ class MainWindow(QMainWindow):
                     service=market_analysis,
                 )
             else:
-                page = EmptyStatePage(meta, translator, self)
+                page = EmptyStatePage(meta, translator, self, theme_manager=theme_manager)
             self._pages[meta.key] = page
             self._stack.addWidget(page)
 
@@ -105,13 +128,17 @@ class MainWindow(QMainWindow):
         )
         self.setStatusBar(self._status_bar)
 
+        # -- toasts --------------------------------------------------------------
+        self._toasts = ToastHost(self, theme_manager)
+
         # -- command palette ----------------------------------------------------
         self._palette = CommandPalette(translator, self)
 
         # -- wiring ---------------------------------------------------------------
         self._sidebar.navigate.connect(self.switch_page)
         bus.navigate_requested.connect(self.switch_page)
-        bus.mt5_connection_changed.connect(self._on_mt5_connection_changed)
+        bus.mt5_connection_changed.connect(self._on_probe_result)
+        bus.gateway_state_changed.connect(self._on_gateway_state)
         translator.language_changed.connect(self._on_language_changed)
 
         self._palette_shortcut = QShortcut(QKeySequence(self.PALETTE_SHORTCUT), self)
@@ -119,6 +146,7 @@ class MainWindow(QMainWindow):
         self._palette_shortcut.activated.connect(self.open_palette)
 
         # -- initial state ---------------------------------------------------------
+        self._restore_window()
         self.switch_page("dashboard")
 
     # -- public API ------------------------------------------------------------
@@ -126,6 +154,10 @@ class MainWindow(QMainWindow):
         """Open the Ctrl+K command palette."""
         self._palette.set_commands(self._build_commands())
         self._palette.open_at(self)
+
+    def toast(self, title: str, body: str = "", variant: str = "info") -> None:
+        """Show a transient toast notification."""
+        self._toasts.show_toast(title, body, variant)
 
     def switch_page(self, key: str) -> None:
         """Navigate to page ``key`` (raises ``KeyError`` for unknown keys)."""
@@ -137,6 +169,34 @@ class MainWindow(QMainWindow):
     def page_keys(self) -> tuple[str, ...]:
         """Keys of all registered pages, in display order."""
         return tuple(meta.key for meta in PAGES)
+
+    # -- window state -------------------------------------------------------------
+    def _restore_window(self) -> None:
+        """Restore the persisted geometry (falls back to the default size)."""
+        qs = QSettings(_ORG, _APP)
+        geometry = qs.value(_KEY_GEOMETRY)
+        if isinstance(geometry, QByteArray) and self.restoreGeometry(geometry):
+            state = qs.value(_KEY_WINDOW_STATE)
+            if isinstance(state, QByteArray):
+                self.restoreState(state)
+            return
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            width = min(_DEFAULT_SIZE[0], available.width() - 40)
+            height = min(_DEFAULT_SIZE[1], available.height() - 40)
+            self.resize(width, height)
+
+    def _persist_window(self) -> None:
+        qs = QSettings(_ORG, _APP)
+        qs.setValue(_KEY_GEOMETRY, self.saveGeometry())
+        qs.setValue(_KEY_WINDOW_STATE, self.saveState())
+        qs.sync()
+
+    def closeEvent(self, event: Any) -> None:
+        """Persist window geometry before closing."""
+        self._persist_window()
+        super().closeEvent(event)
 
     # -- internals ---------------------------------------------------------------
     def _build_commands(self) -> list[Command]:
@@ -178,9 +238,19 @@ class MainWindow(QMainWindow):
         other = "fa" if self._translator.language == "en" else "en"
         self._translator.set_language(other)
 
-    def _on_mt5_connection_changed(self, ok: bool, detail: str) -> None:
-        """Reflect the Phase-3 connection probe result in the status bar."""
+    def _on_probe_result(self, ok: bool, detail: str) -> None:
+        """One-shot probe result (Settings → Test connection)."""
         self._status_bar.set_connection_state(ok, detail)
+        key = "toast.probe.ok" if ok else "toast.probe.failed"
+        self.toast(
+            self._translator.translate(key),
+            detail,
+            "ok" if ok else "bad",
+        )
+
+    def _on_gateway_state(self, state: str, detail: str) -> None:
+        """Live shared-gateway state (connecting / connected / reconnecting…)."""
+        self._status_bar.set_gateway_state(state, detail)
 
     def _on_language_changed(self, _language: str) -> None:
         self.setWindowTitle(self._translator.translate("app.title"))

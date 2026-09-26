@@ -2,7 +2,7 @@
 
 A production-quality Windows desktop application that connects to your **MetaTrader 5** account, analyzes markets, estimates the win probability of trade setups, executes trades under strict risk control, logs everything, and stores history in Supabase for AI-driven analysis.
 
-> **Status:** Phases 1–5 complete (foundation, observability, MT5 connection, storage, market data & analysis) — latest release **v0.4.1**. Next: Phase 6 — Strategies & signals. See [docs/PROGRESS.md](docs/PROGRESS.md).
+> **Status:** Phases 1–5 complete (foundation, observability, MT5 connection, storage, market data & analysis) **plus the Phase 5.5 UI overhaul** (design system v2, responsive shell, persistent MT5 connect, in-app delta updates). Next: Strategies & signals. See [docs/PROGRESS.md](docs/PROGRESS.md).
 
 ## What it is (and is not)
 

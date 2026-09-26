@@ -1,9 +1,11 @@
 """Market page (SPEC G3-5, F3): chart + analysis cards + scanner + calendar.
 
-Layout: symbol selector on top; left = candlestick chart with the chosen
-symbol/timeframe; right column = analysis card (plain-language, EN/FA),
-trend matrix, key levels, session/spread badges, upcoming calendar events
-and the opportunity-scanner strip.
+v2 layout: a horizontal ``QSplitter`` — left = candlestick chart with the
+chosen symbol/timeframe, right = a scrollable analysis column (plain-
+language card, trend matrix, key levels, scanner, calendar). The splitter
+keeps a responsive balance on any window size and the user can drag it.
+Symbol and timeframe selectors sit in a toolbar row with spread/broker
+badges on the leading edge.
 
 Data flow: the page owns NO analysis logic. A QTimer drives
 ``MarketAnalysisService.refresh_now()``/``poll()``; the service never
@@ -24,6 +26,7 @@ from PySide6.QtWidgets import (
     QLayout,
     QPushButton,
     QScrollArea,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -41,6 +44,9 @@ REFRESH_MS = 60_000
 
 VISIBLE_LEVELS = 8
 CHART_BARS = 120
+#: Minimum widths for the splitter children (keeps both sides usable).
+CHART_MIN_WIDTH = 420
+SIDE_MIN_WIDTH = 320
 
 
 def _card() -> QFrame:
@@ -56,6 +62,12 @@ def _clear_layout(layout: QLayout) -> None:
         widget = item.widget() if item is not None else None
         if widget is not None:
             widget.deleteLater()
+
+
+def _card_title(text: str) -> QLabel:
+    label = QLabel(text)
+    label.setObjectName("CardTitle")
+    return label
 
 
 class MarketPage(QWidget):
@@ -78,20 +90,22 @@ class MarketPage(QWidget):
         self._last_snapshot: MarketSnapshot | None = None
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(16, 16, 16, 16)
+        root.setContentsMargins(20, 16, 20, 16)
         root.setSpacing(12)
 
         # -- symbol + timeframe selector row --------------------------------
         selector_row = QHBoxLayout()
+        selector_row.setSpacing(0)
         self._symbol_buttons: dict[str, QPushButton] = {}
         for symbol in ("EURUSD", "GBPUSD", "XAUUSD"):
             btn = QPushButton(symbol)
-            btn.setObjectName("Badge")
+            btn.setObjectName("SegmentButton")
             btn.setCheckable(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.clicked.connect(lambda _checked=False, s=symbol: self.select_symbol(s))
             self._symbol_buttons[symbol] = btn
             selector_row.addWidget(btn)
-        selector_row.addSpacing(12)
+        selector_row.addSpacing(16)
         self._tf_combo = QComboBox()
         for tf in (Timeframe.M15, Timeframe.H1, Timeframe.H4, Timeframe.D1):
             self._tf_combo.addItem(tf.value, tf)
@@ -110,55 +124,71 @@ class MarketPage(QWidget):
 
         self._empty_label = QLabel()
         self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_label.setWordWrap(True)
         root.addWidget(self._empty_label)
 
         # -- main split: chart | side panels ---------------------------------
-        body = QHBoxLayout()
-        body.setSpacing(12)
+        self._splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        self._splitter.setChildrenCollapsible(False)
+        self._splitter.setHandleWidth(6)
 
         chart_card = _card()
         chart_layout = QVBoxLayout(chart_card)
+        chart_layout.setContentsMargins(12, 12, 12, 12)
         self._chart = PriceChart(chart_card)
+        self._chart.setMinimumHeight(360)
         chart_layout.addWidget(self._chart, 1)
-        body.addWidget(chart_card, 3)
+        chart_card.setMinimumWidth(CHART_MIN_WIDTH)
+        self._splitter.addWidget(chart_card)
 
         side_scroll = QScrollArea()
         side_scroll.setWidgetResizable(True)
         side_scroll.setFrameShape(QFrame.Shape.NoFrame)
         side_widget = QWidget()
+        side_widget.setStyleSheet("background: transparent;")
         side_layout = QVBoxLayout(side_widget)
         side_layout.setContentsMargins(0, 0, 0, 0)
         side_layout.setSpacing(12)
 
         self._card_frame = _card()
         self._card_layout = QVBoxLayout(self._card_frame)
-        self._card_layout.setContentsMargins(12, 12, 12, 12)
+        self._card_layout.setContentsMargins(16, 14, 16, 14)
+        self._card_layout.setSpacing(6)
         side_layout.addWidget(self._card_frame)
 
         self._trend_frame = _card()
         self._trend_layout = QVBoxLayout(self._trend_frame)
-        self._trend_layout.setContentsMargins(12, 12, 12, 12)
+        self._trend_layout.setContentsMargins(16, 14, 16, 14)
+        self._trend_layout.setSpacing(6)
         side_layout.addWidget(self._trend_frame)
 
         self._levels_frame = _card()
         self._levels_layout = QGridLayout(self._levels_frame)
-        self._levels_layout.setContentsMargins(12, 12, 12, 12)
+        self._levels_layout.setContentsMargins(16, 14, 16, 14)
+        self._levels_layout.setHorizontalSpacing(14)
+        self._levels_layout.setVerticalSpacing(5)
         side_layout.addWidget(self._levels_frame)
 
         self._scan_frame = _card()
         self._scan_layout = QVBoxLayout(self._scan_frame)
-        self._scan_layout.setContentsMargins(12, 12, 12, 12)
+        self._scan_layout.setContentsMargins(16, 14, 16, 14)
+        self._scan_layout.setSpacing(6)
         side_layout.addWidget(self._scan_frame)
 
         self._calendar_frame = _card()
         self._calendar_layout = QVBoxLayout(self._calendar_frame)
-        self._calendar_layout.setContentsMargins(12, 12, 12, 12)
+        self._calendar_layout.setContentsMargins(16, 14, 16, 14)
+        self._calendar_layout.setSpacing(6)
         side_layout.addWidget(self._calendar_frame)
         side_layout.addStretch(1)
 
         side_scroll.setWidget(side_widget)
-        body.addWidget(side_scroll, 2)
-        root.addLayout(body, 1)
+        side_scroll.setMinimumWidth(SIDE_MIN_WIDTH)
+        self._splitter.addWidget(side_scroll)
+        self._splitter.setStretchFactor(0, 3)
+        self._splitter.setStretchFactor(1, 2)
+        self._splitter.setSizes([760, 460])
+        root.addWidget(self._splitter, 1)
 
         self._side_panels = [
             self._card_frame,
@@ -262,25 +292,30 @@ class MarketPage(QWidget):
         for line in getattr(card, "lines", ()):
             label = QLabel(tr(line.key, **line.params))
             label.setWordWrap(True)
+            label.setObjectName("MutedLabel")
             self._card_layout.addWidget(label)
 
     def _render_trend(self, snap: SymbolSnapshot) -> None:
         tr = self._translator.translate
         _clear_layout(self._trend_layout)
-        heading = QLabel(tr("market.trend"))
-        heading.setObjectName("CardTitle")
-        self._trend_layout.addWidget(heading)
+        self._trend_layout.addWidget(_card_title(tr("market.trend")))
         for vector in snap.trend.vectors:
-            label = QLabel(f"{vector.timeframe.value}: {vector.label}  ({vector.strength}/100)")
-            self._trend_layout.addWidget(label)
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            tf_label = QLabel(vector.timeframe.value.upper())
+            tf_label.setObjectName("MonoLabel")
+            tf_label.setFixedWidth(38)
+            value_label = QLabel(f"{vector.label}  ({vector.strength}/100)")
+            value_label.setObjectName("MutedLabel")
+            row.addWidget(tf_label)
+            row.addWidget(value_label, 1)
+            self._trend_layout.addLayout(row)
 
     def _render_levels(self, snap: SymbolSnapshot) -> None:
         tr = self._translator.translate
         layout = self._levels_layout
         _clear_layout(layout)
-        heading = QLabel(tr("market.levels"))
-        heading.setObjectName("CardTitle")
-        layout.addWidget(heading, 0, 0, 1, 2)
+        layout.addWidget(_card_title(tr("market.levels")), 0, 0, 1, 2)
         atr_value = snap.volatility.atr or 0.0
         price = snap.last_close
         rows = 1
@@ -291,16 +326,15 @@ class MarketPage(QWidget):
                 f"{level.price:.{snap.digits}f}  ·  "
                 + tr("market.level.distance", atr=f"{distance:+.1f}")
             )
+            value.setObjectName("MonoLabel")
             layout.addWidget(name, rows, 0)
-            layout.addWidget(value, rows, 1)
+            layout.addWidget(value, rows, 1, Qt.AlignmentFlag.AlignRight)
             rows += 1
 
     def _render_scan(self, snapshot: MarketSnapshot | None) -> None:
         tr = self._translator.translate
         _clear_layout(self._scan_layout)
-        heading = QLabel(tr("market.scanner"))
-        heading.setObjectName("CardTitle")
-        self._scan_layout.addWidget(heading)
+        self._scan_layout.addWidget(_card_title(tr("market.scanner")))
         if snapshot is None:
             return
         for entry in snapshot.scan:
@@ -308,18 +342,18 @@ class MarketPage(QWidget):
             label = QLabel(
                 f"{entry.symbol} — {tr(state_key)}  ·  {tr('market.bias')} {entry.score}"
             )
+            label.setObjectName("MutedLabel")
             self._scan_layout.addWidget(label)
 
     def _render_calendar(self, snap: SymbolSnapshot) -> None:
         tr = self._translator.translate
         _clear_layout(self._calendar_layout)
-        heading = QLabel(tr("market.calendar"))
-        heading.setObjectName("CardTitle")
-        self._calendar_layout.addWidget(heading)
+        self._calendar_layout.addWidget(_card_title(tr("market.calendar")))
         event = snap.card.next_event
         if event is None:
             note = QLabel(tr("market.calendar.empty"))
             note.setWordWrap(True)
+            note.setObjectName("MutedLabel")
             self._calendar_layout.addWidget(note)
             return
         minutes = event.minutes_until
@@ -363,10 +397,4 @@ class MarketPage(QWidget):
     def retranslate(self) -> None:
         tr = self._translator.translate
         self._empty_label.setText(f"{tr('market.no_data')}\n\n{tr('market.empty.desc')}")
-        heading_map = {
-            self._trend_frame: "market.trend",
-            self._scan_frame: "market.scanner",
-            self._calendar_frame: "market.calendar",
-        }
-        _ = heading_map  # headings re-render on the next snapshot
         self._render()

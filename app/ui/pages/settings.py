@@ -1,34 +1,44 @@
-"""Settings page — appearance, build info, and the MT5 connection card.
-
-The connection card (Phase 3, SPEC G3-3) edits the persisted
-:class:`~app.core.settings.Mt5AccountSettings`, stores the password only in
-Windows Credential Manager via :class:`~app.mt5.credentials.CredentialStore`,
-and runs :class:`~app.mt5.diagnostics.ConnectionProbe` behind a QTimer so
-the UI thread never blocks (SPEC C3, I-8).
+"""Settings page — appearance, updates, MT5 connection (probe + persistent
+connect), storage & sync, about. v2: centered scroll column, consistent
+card rhythm, in-app delta updates and a persistent Connect/Disconnect
+that drives the shared gateway.
 """
 
 from __future__ import annotations
 
+import os
 import platform
+import subprocess
 import sys
+from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFormLayout,
     QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QProgressBar,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
 from app.__version__ import __version__
 from app.core.event_bus import EventBus
-from app.core.settings import Mt5AccountSettings, load_cloud_url, save_cloud_url
+from app.core.settings import (
+    Mt5AccountSettings,
+    load_check_updates,
+    load_cloud_url,
+    save_check_updates,
+    save_cloud_url,
+)
 from app.mt5.credentials import CredentialStore, CredentialStoreError
 from app.mt5.diagnostics import ConnectionProbe
 from app.mt5.models import ConnectRequest
@@ -37,13 +47,28 @@ from app.storage.mirror import SUPABASE_KEY_ENTRY
 from app.storage.vault import KeyringVault, VaultError
 from app.ui.i18n.translator import Translator
 from app.ui.theme.manager import ThemeManager
+from app.ui.workers import ConnectWorker
+from app.updater.service import CheckResult, UpdateService
+from app.updater.worker import UpdateWorker
 
 _PROBE_POLL_MS = 150
 _STORAGE_POLL_MS = 2000
 
+#: Maximum width of the centered settings column.
+COLUMN_WIDTH = 780
+
+
+def _card() -> QFrame:
+    frame = QFrame()
+    frame.setObjectName("Card")
+    frame.setMaximumWidth(COLUMN_WIDTH)
+    policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+    frame.setSizePolicy(policy)
+    return frame
+
 
 class SettingsPage(QWidget):
-    """Appearance settings (theme, language), connection card, build info."""
+    """Appearance settings, connection card, storage card, about."""
 
     def __init__(
         self,
@@ -56,6 +81,8 @@ class SettingsPage(QWidget):
         mt5_factory: Any | None = None,
         bus: EventBus | None = None,
         storage: Any | None = None,
+        shared_gateway: Any | None = None,
+        updater: UpdateService | None = None,
     ) -> None:
         super().__init__(parent)
         self._translator = translator
@@ -65,19 +92,42 @@ class SettingsPage(QWidget):
         self._mt5_factory = mt5_factory
         self._bus = bus
         self._storage = storage
+        self._shared_gateway = shared_gateway
+        self._updater = updater or UpdateService(current_version=__version__)
+        self._update_worker: UpdateWorker | None = None
+        self._staged_version: str | None = None
         self._probe: ConnectionProbe | None = None
         self._cloud_probe: CloudProbe | None = None
+        self._connect_worker: ConnectWorker | None = None
         self._vault = KeyringVault()
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(32, 32, 32, 32)
-        outer.setSpacing(16)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        outer.addWidget(scroll)
+
+        host = QWidget()
+        host.setStyleSheet("background: transparent;")
+        scroll.setWidget(host)
+
+        column = QVBoxLayout(host)
+        column.setContentsMargins(32, 28, 32, 28)
+        column.setSpacing(16)
+
+        # centered fixed-width column that degrades gracefully on narrow windows
+        self._column = QVBoxLayout()
+        self._column.setSpacing(16)
+        self._column.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        column.addLayout(self._column, 0)
+        column.addStretch(1)
 
         # -- appearance card -------------------------------------------------
-        appearance = QFrame()
-        appearance.setObjectName("Card")
+        appearance = _card()
         appearance_layout = QVBoxLayout(appearance)
-        appearance_layout.setContentsMargins(28, 24, 28, 24)
+        appearance_layout.setContentsMargins(24, 20, 24, 20)
         appearance_layout.setSpacing(12)
 
         self._appearance_title = QLabel()
@@ -92,6 +142,7 @@ class SettingsPage(QWidget):
         self._theme_combo.addItem("", "dark")
         self._theme_combo.addItem("", "light")
         self._theme_combo.setCurrentIndex(0 if theme_manager.current == "dark" else 1)
+        self._theme_combo.setMinimumWidth(200)
         self._theme_combo.activated.connect(self._on_theme_activated)
 
         self._language_label = QLabel()
@@ -99,19 +150,22 @@ class SettingsPage(QWidget):
         self._language_combo.addItem("", "en")
         self._language_combo.addItem("", "fa")
         self._language_combo.setCurrentIndex(0 if translator.language == "en" else 1)
+        self._language_combo.setMinimumWidth(200)
         self._language_combo.activated.connect(self._on_language_activated)
 
         form.addRow(self._theme_label, self._theme_combo)
         form.addRow(self._language_label, self._language_combo)
         appearance_layout.addWidget(self._appearance_title)
         appearance_layout.addLayout(form)
-        outer.addWidget(appearance)
+        self._column.addWidget(appearance)
 
-        # -- connection card (Phase 3) ----------------------------------------
-        connection = QFrame()
-        connection.setObjectName("Card")
+        # -- updates card (Phase 6) -------------------------------------------
+        self._build_updates_card()
+
+        # -- connection card (Phase 3 probe + Phase 6 persistent connect) ------
+        connection = _card()
         connection_layout = QVBoxLayout(connection)
-        connection_layout.setContentsMargins(28, 24, 28, 24)
+        connection_layout.setContentsMargins(24, 20, 24, 20)
         connection_layout.setSpacing(12)
 
         self._connection_title = QLabel()
@@ -143,7 +197,7 @@ class SettingsPage(QWidget):
         self._password_edit = QLineEdit()
         self._password_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self._save_password_button = QPushButton()
-        self._save_password_button.setObjectName("Badge")
+        self._save_password_button.setObjectName("GhostButton")
         self._save_password_button.clicked.connect(self._on_save_password)
         password_row = QHBoxLayout()
         password_row.setContentsMargins(0, 0, 0, 0)
@@ -157,40 +211,50 @@ class SettingsPage(QWidget):
         connection_layout.addWidget(self._connection_title)
         connection_layout.addLayout(connection_form)
 
+        self._auto_connect_check = QCheckBox()
+        self._auto_connect_check.setChecked(self._account_settings.auto_connect)
+        self._auto_connect_check.toggled.connect(self._on_auto_connect_toggled)
+        connection_layout.addWidget(self._auto_connect_check)
+
         actions = QHBoxLayout()
         actions.setContentsMargins(0, 0, 0, 0)
+        actions.setSpacing(8)
+        self._connect_button = QPushButton()
+        self._connect_button.setObjectName("AccentButton")
+        self._connect_button.clicked.connect(self._on_connect_clicked)
         self._test_button = QPushButton()
-        self._test_button.setObjectName("PrimaryButton")
+        self._test_button.setObjectName("GhostButton")
         self._test_button.clicked.connect(self._on_test_connection)
         self._result_label = QLabel()
         self._result_label.setWordWrap(True)
+        actions.addWidget(self._connect_button)
         actions.addWidget(self._test_button)
         actions.addWidget(self._result_label, 1)
         connection_layout.addLayout(actions)
-        outer.addWidget(connection)
+        self._column.addWidget(connection)
 
         # -- storage & sync card (Phase 4) --------------------------------------
         if self._storage is not None:
-            self._build_storage_card(outer)
+            self._build_storage_card()
 
         # -- about card ------------------------------------------------------
-        about = QFrame()
-        about.setObjectName("Card")
+        about = _card()
         about_layout = QVBoxLayout(about)
-        about_layout.setContentsMargins(28, 24, 28, 24)
+        about_layout.setContentsMargins(24, 20, 24, 20)
         about_layout.setSpacing(12)
 
         self._about_title = QLabel()
         self._about_title.setObjectName("CardTitle")
 
         self._version_label = QLabel()
+        self._version_label.setObjectName("MonoLabel")
         self._python_label = QLabel()
+        self._python_label.setObjectName("FaintLabel")
 
         about_layout.addWidget(self._about_title)
         about_layout.addWidget(self._version_label)
         about_layout.addWidget(self._python_label)
-        outer.addWidget(about)
-        outer.addStretch(1)
+        self._column.addWidget(about)
 
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(_PROBE_POLL_MS)
@@ -208,6 +272,136 @@ class SettingsPage(QWidget):
         translator.language_changed.connect(lambda _lang: self.retranslate())
         self.retranslate()
 
+    # -- updates card (Phase 6) ------------------------------------------------
+    def _build_updates_card(self) -> None:
+        card = _card()
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(12)
+
+        self._updates_title = QLabel()
+        self._updates_title.setObjectName("CardTitle")
+        layout.addWidget(self._updates_title)
+
+        self._update_version_label = QLabel()
+        self._update_version_label.setObjectName("MonoLabel")
+        layout.addWidget(self._update_version_label)
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self._update_check_button = QPushButton()
+        self._update_check_button.setObjectName("AccentButton")
+        self._update_check_button.clicked.connect(self._on_check_updates)
+        row.addWidget(self._update_check_button)
+        self._update_restart_button = QPushButton()
+        self._update_restart_button.setObjectName("DangerButton")
+        self._update_restart_button.setVisible(False)
+        self._update_restart_button.clicked.connect(self._on_restart_and_install)
+        row.addWidget(self._update_restart_button)
+        self._update_status_label = QLabel()
+        self._update_status_label.setWordWrap(True)
+        row.addWidget(self._update_status_label, 1)
+        layout.addLayout(row)
+
+        self._update_progress = QProgressBar()
+        self._update_progress.setVisible(False)
+        self._update_progress.setRange(0, 100)
+        layout.addWidget(self._update_progress)
+
+        self._update_startup_check = QCheckBox()
+        self._update_startup_check.setChecked(load_check_updates())
+        self._update_startup_check.toggled.connect(self._on_startup_check_toggled)
+        layout.addWidget(self._update_startup_check)
+        if not self._updater.enabled:
+            self._update_check_button.setEnabled(False)
+            self._update_status_label.setText(self._tr("updates.dev_mode"))
+        self._column.addWidget(card)
+
+    def _tr(self, key: str, **params: Any) -> str:
+        return self._translator.translate(key, **params)
+
+    def _on_startup_check_toggled(self, checked: bool) -> None:
+        save_check_updates(checked)
+
+    def _on_check_updates(self) -> None:
+        if self._update_worker is not None:
+            return
+        self._update_check_button.setEnabled(False)
+        self._update_status_label.setText(self._tr("updates.checking"))
+        self._update_worker = UpdateWorker(self._updater, "update")
+        self._update_worker.check_finished.connect(self._on_update_check_done)
+        self._update_worker.progress.connect(self._on_update_progress)
+        self._update_worker.stage_finished.connect(self._on_update_staged)
+        self._update_worker.start()
+
+    def _on_update_check_done(self, result: object, error: str) -> None:
+        tr = self._tr
+        if error:
+            self._update_status_label.setText(tr("updates.failed", error=error))
+            self._update_check_button.setEnabled(True)
+            return
+        assert isinstance(result, CheckResult)
+        if result.error:
+            self._update_status_label.setText(tr("updates.failed", error=result.error))
+            self._update_check_button.setEnabled(True)
+            return
+        if not result.available:
+            self._update_status_label.setText(tr("updates.up_to_date", version=__version__))
+            self._update_check_button.setEnabled(True)
+
+    def _on_update_progress(self, done: int, total: object) -> None:
+        self._update_progress.setVisible(True)
+        if isinstance(total, int) and total > 0:
+            self._update_progress.setRange(0, 100)
+            pct = min(100, int(done * 100 / total))
+            self._update_progress.setValue(pct)
+            self._update_status_label.setText(self._tr("updates.downloading", pct=pct))
+        else:
+            self._update_progress.setRange(0, 0)  # busy indicator
+
+    def _on_update_staged(self, ok: bool, message: str, _staging: object) -> None:
+        self._update_worker = None
+        self._update_progress.setVisible(False)
+        self._update_progress.setRange(0, 100)
+        if ok:
+            self._staged_version = message
+            self._update_status_label.setText(self._tr("updates.staged", version=message))
+            self._update_restart_button.setVisible(True)
+            self._update_check_button.setEnabled(False)
+        else:
+            self._update_status_label.setText(self._tr("updates.failed", error=message))
+            self._update_check_button.setEnabled(True)
+
+    def _on_restart_and_install(self) -> None:
+        """Launch the apply script detached, then quit so it can swap files."""
+        if self._staged_version is None or os.name != "nt":
+            return
+        script = self._updater.apply_script_path(self._staged_version)
+        if script is None or not Path(script).is_file():
+            return
+        detached = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+        subprocess.Popen(
+            [str(script)],
+            close_fds=True,
+            cwd=str(script.parent),
+            creationflags=detached,
+            shell=False,
+        )
+        from PySide6.QtWidgets import QApplication
+
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
+
+    def apply_check_result(self, result: CheckResult) -> None:
+        """Reflect a startup check performed by the app shell."""
+        if result.available and result.plan is not None:
+            self._update_status_label.setText(
+                self._tr("updates.available", version=result.plan.new_version)
+            )
+        elif result.error:
+            self._update_status_label.setText(self._tr("updates.failed", error=result.error))
+
     # -- wiring --------------------------------------------------------------
     def _on_theme_activated(self, index: int) -> None:
         value = self._theme_combo.itemData(index)
@@ -219,7 +413,71 @@ class SettingsPage(QWidget):
         if isinstance(value, str):
             self._translator.set_language(value)
 
-    # -- connection card --------------------------------------------------------
+    # -- connection card: persistent connect (Phase 6) ----------------------------
+    def _on_auto_connect_toggled(self, checked: bool) -> None:
+        self._account_settings.auto_connect = checked
+
+    def _on_connect_clicked(self) -> None:
+        tr = self._translator.translate
+        if self._shared_gateway is None:
+            self._result_label.setText(tr("settings.account.test_failed", detail="gateway offline"))
+            return
+        if self._connect_worker is not None:  # already busy
+            return
+        if self._shared_gateway.state().value == "connected":
+            self._start_connect_worker(mode="disconnect")
+            return
+        login = self._persist_account()
+        server = self._account_settings.server
+        if login <= 0 or not server:
+            self._result_label.setText(tr("connect.missing_credentials"))
+            return
+        password = self._password_edit.text()
+        if not password:
+            try:
+                password = self._credential_store.get_password(login) or ""
+            except CredentialStoreError:
+                password = ""
+        if not password:
+            self._result_label.setText(tr("connect.no_password"))
+            return
+        request = ConnectRequest(
+            login=login,
+            password=password,
+            server=server,
+            terminal_path=self._account_settings.terminal_path,
+        )
+        self._start_connect_worker(mode="connect", request=request)
+
+    def _start_connect_worker(
+        self,
+        mode: str,
+        request: ConnectRequest | None = None,
+    ) -> None:
+        tr = self._translator.translate
+        self._connect_button.setEnabled(False)
+        if mode == "connect":
+            self._result_label.setText(tr("connect.connecting"))
+            self._connect_worker = ConnectWorker(self._shared_gateway, request)
+        else:
+            self._connect_worker = ConnectWorker(self._shared_gateway, None, mode="disconnect")
+        self._connect_worker.result_ready.connect(self._on_connect_result)
+        self._connect_worker.start()
+
+    def _on_connect_result(self, ok: bool, detail: str) -> None:
+        tr = self._translator.translate
+        worker, self._connect_worker = self._connect_worker, None
+        if worker is not None:
+            worker.wait()
+            worker.deleteLater()
+        self._connect_button.setEnabled(True)
+        if ok:
+            self._result_label.setText(tr("connect.done"))
+        else:
+            self._result_label.setText(tr("connect.wait_failed", detail=detail))
+        # the gateway's own state callback refreshes the status bar via the bus
+
+    # -- connection card: one-shot probe (Phase 3) ------------------------------
     def _load_account_into_form(self) -> None:
         account = self._account_settings
         if account.login:
@@ -310,12 +568,11 @@ class SettingsPage(QWidget):
             self._bus.mt5_connection_changed.emit(state.ok, state.detail)
 
     # -- storage & sync card -----------------------------------------------------
-    def _build_storage_card(self, outer: QVBoxLayout) -> None:
+    def _build_storage_card(self) -> None:
         tr = self._translator.translate
-        card = QFrame()
-        card.setObjectName("Card")
+        card = _card()
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(12)
 
         self._storage_title = QLabel()
@@ -326,6 +583,7 @@ class SettingsPage(QWidget):
         self._db_label = QLabel()
         self._db_label.setWordWrap(True)
         self._size_label = QLabel()
+        self._size_label.setObjectName("FaintLabel")
         self._schema_label = QLabel()
         self._integrity_label = QLabel()
         self._backups_label = QLabel()
@@ -362,13 +620,15 @@ class SettingsPage(QWidget):
 
         buttons = QHBoxLayout()
         buttons.setContentsMargins(0, 0, 0, 0)
+        buttons.setSpacing(8)
         self._cloud_save_button = QPushButton()
-        self._cloud_save_button.setObjectName("PrimaryButton")
+        self._cloud_save_button.setObjectName("AccentButton")
         self._cloud_save_button.clicked.connect(self._on_save_cloud)
         self._cloud_test_button = QPushButton()
+        self._cloud_test_button.setObjectName("GhostButton")
         self._cloud_test_button.clicked.connect(self._on_test_cloud)
         self._cloud_remove_button = QPushButton()
-        self._cloud_remove_button.setObjectName("Badge")
+        self._cloud_remove_button.setObjectName("DangerButton")
         self._cloud_remove_button.clicked.connect(self._on_remove_key)
         buttons.addWidget(self._cloud_save_button)
         buttons.addWidget(self._cloud_test_button)
@@ -378,7 +638,7 @@ class SettingsPage(QWidget):
         buttons.addWidget(self._cloud_result_label, 1)
         layout.addLayout(buttons)
 
-        outer.addWidget(card)
+        self._column.addWidget(card)
 
     def _load_cloud_into_form(self) -> None:
         url = load_cloud_url()
@@ -510,9 +770,6 @@ class SettingsPage(QWidget):
         self._theme_combo.setItemText(1, tr("settings.theme.light"))
         self._language_combo.setItemText(0, tr("settings.language.en"))
         self._language_combo.setItemText(1, tr("settings.language.fa"))
-        # keep placeholder width stable with longest item
-        self._theme_combo.setFixedWidth(220)
-        self._language_combo.setFixedWidth(220)
 
         self._connection_title.setText(tr("settings.connection"))
         self._login_label.setText(tr("settings.account.login"))
@@ -524,12 +781,25 @@ class SettingsPage(QWidget):
         self._login_edit.setPlaceholderText(tr("settings.account.login.placeholder"))
         self._server_edit.setPlaceholderText(tr("settings.account.server.placeholder"))
         self._terminal_edit.setPlaceholderText(tr("settings.account.terminal_path.placeholder"))
+        self._auto_connect_check.setText(tr("connect.auto"))
+        connected = (
+            self._shared_gateway is not None and self._shared_gateway.state().value == "connected"
+        )
+        self._connect_button.setText(
+            tr("connect.disconnect") if connected else tr("connect.connect")
+        )
 
         self._version_label.setText(f"{tr('settings.version')}: {__version__}")
         self._python_label.setText(
             f"{tr('settings.python')}: {platform.python_version()} "
             f"({sys.platform}, {platform.machine()})"
         )
+
+        self._updates_title.setText(tr("updates.title"))
+        self._update_version_label.setText(tr("updates.current", version=__version__))
+        self._update_check_button.setText(tr("updates.check"))
+        self._update_restart_button.setText(tr("updates.restart"))
+        self._update_startup_check.setText(tr("updates.startup"))
 
         if self._storage is not None:
             self._storage_title.setText(tr("settings.storage.title"))

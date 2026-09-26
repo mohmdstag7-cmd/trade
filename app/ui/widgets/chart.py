@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 import pyqtgraph as pg
-from PySide6.QtCore import QPointF, QRectF
+from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QPicture
 
 from app.mt5.models import RateBar
@@ -109,10 +109,13 @@ class PriceChart(pg.GraphicsLayoutWidget):
         super().__init__(parent)
         self._candles = CandlestickItem()
         self._price_plot: pg.PlotItem = self.addPlot(row=0, col=0)
-        self._price_plot.showGrid(x=False, y=False)
+        self._price_plot.showGrid(x=True, y=True, alpha=0.15)
         self._price_plot.setMouseEnabled(x=True, y=False)
         self._price_plot.hideButtons()
         self._price_plot.setAxisItems({"bottom": pg.DateAxisItem(orientation="bottom")})
+        self._price_plot.setMinimumHeight(240)
+        self._price_plot.showAxis("right")
+        self._price_plot.getAxis("right").setWidth(8)
 
         self._volume_plot: pg.PlotItem = self.addPlot(row=1, col=0)
         self._volume_plot.setXLink(self._price_plot)
@@ -121,6 +124,7 @@ class PriceChart(pg.GraphicsLayoutWidget):
         self._volume_plot.setMouseEnabled(x=True, y=False)
         self._volume_plot.hideButtons()
         self._volume_plot.setAxisItems({"bottom": pg.DateAxisItem(orientation="bottom")})
+        self._volume_plot.showGrid(x=True, y=False, alpha=0.15)
 
         self._price_plot.addItem(self._candles)
         self._last_price_line = pg.InfiniteLine(angle=0, movable=False)
@@ -162,8 +166,13 @@ class PriceChart(pg.GraphicsLayoutWidget):
                 ax = plot.getAxis(axis)
                 ax.setPen(pg.mkPen(text))
                 ax.setTextPen(pg.mkPen(text))
+            plot.getAxis("bottom").setGrid(120)
+            plot.getAxis("left").setGrid(120)
         for item in (self._price_plot, self._volume_plot):
             item.getViewBox().setBackgroundColor(tokens.card)
+            item.getViewBox().setBorder(pg.mkPen(tokens.border))
         self.setBackground(tokens.card)
-        self._last_price_line.setPen(pg.mkPen(QColor(tokens.accent), width=1))
+        self._last_price_line.setPen(
+            pg.mkPen(QColor(tokens.accent), width=1, style=Qt.PenStyle.DashLine)
+        )
         self._candles.set_colors(tokens)
