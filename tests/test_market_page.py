@@ -108,3 +108,35 @@ class TestStatusBarBrokerClock:
         )
         qtbot.addWidget(bar)
         assert "UTC" not in bar._clock_label.text()
+
+
+class TestMarketPageUnresolvedHint:
+    def test_unresolved_symbols_shown_in_empty_state(
+        self, qtbot, translator, theme_manager
+    ) -> None:
+        from app.analysis.service import MarketSnapshot
+
+        page = MarketPage(translator, theme_manager, service=None)
+        qtbot.addWidget(page)
+        page.show()
+        snapshot = MarketSnapshot(
+            symbols=(),
+            correlation=None,
+            strength=(),
+            scan=(),
+            unresolved=("XAUUSD",),
+        )
+        page._last_snapshot = snapshot
+        page._render()
+        assert page._empty_label.isVisible()
+        assert "Not available" in page._empty_label.text()
+        assert "XAUUSD" in page._empty_label.text()
+
+    def test_plain_empty_state_has_no_unresolved_hint(
+        self, qtbot, translator, theme_manager
+    ) -> None:
+        page = MarketPage(translator, theme_manager, service=None)
+        qtbot.addWidget(page)
+        page.show()
+        page._render_empty_hint(None)
+        assert "Not available" not in page._empty_label.text()

@@ -82,6 +82,7 @@ EN: dict[str, str] = {
     "settings.account.login.placeholder": "e.g. 12345678",
     "settings.account.server": "Server",
     "settings.account.server.placeholder": "e.g. MetaQuotes-Demo",
+    "settings.account.server.suspicious": "This does not look like an MT5 server name — did the password end up here instead?",
     "settings.account.terminal_path": "Terminal path (optional)",
     "settings.account.terminal_path.placeholder": "auto-detect if empty",
     "settings.account.password": "Password",
@@ -137,6 +138,7 @@ EN: dict[str, str] = {
     "settings.cloud.test_failed": "Cloud test failed: {detail}",
     # -- Market page (Phase 5) ---------------------------------------------
     "market.empty.desc": "Connect to your MT5 terminal and analysis cards for EURUSD, GBPUSD and XAUUSD appear here, refreshed on every closed bar.",
+    "market.empty.unresolved": "Not available on this broker: {symbols}. The name this broker lists may differ (e.g. EURUSD.m) — check the Logs page for the resolved names.",
     "market.no_data": "Waiting for closed bars…",
     "market.symbol_group": "Watched symbols",
     "market.chart": "Chart",
@@ -298,6 +300,7 @@ FA: dict[str, str] = {
     "settings.account.login.placeholder": "مثلاً 12345678",
     "settings.account.server": "سرور",
     "settings.account.server.placeholder": "مثلاً MetaQuotes-Demo",
+    "settings.account.server.suspicious": "این متن شبیه نام سرور MT5 نیست — آیا رمز اشتباهی اینجا وارد شده؟",
     "settings.account.terminal_path": "مسیر ترمینال (اختیاری)",
     "settings.account.terminal_path.placeholder": "خالی = تشخیص خودکار",
     "settings.account.password": "رمز عبور",
@@ -353,6 +356,7 @@ FA: dict[str, str] = {
     "status.connection.tooltip": "وضعیت اتصال به ترمینال MT5. از صفحهٔ تنظیمات پیکربندی می‌شود.",
     # -- bazar page (phase 5) -----------------------------------------------
     "market.empty.desc": "به ترمینال MT5 وصل شوید تا کارت‌های تحلیل EURUSD، GBPUSD و XAUUSD اینجا ظاهر شوند و با هر کندل بسته به‌روزرسانی شوند.",
+    "market.empty.unresolved": "در این بروکر موجود نیست: {symbols}. نام نماد در این بروکر ممکن است متفاوت باشد (مثلاً EURUSD.m) — نام‌های یافت‌شده را در صفحه Logs ببینید.",
     "market.no_data": "در انتظار کندل‌های بسته…",
     "market.symbol_group": "نمادهای تحت نظر",
     "market.chart": "چارت",

@@ -519,6 +519,21 @@ def run_gui(debug: bool = False) -> int:
     # the Phase 6 auto-connect with saved credentials).
     market_service, shared_gateway = _build_market_service(bus)
 
+    def _reset_market_on_disconnect(state: str, _detail: str) -> None:
+        # A reconnect may land on a different broker account with different
+        # symbol decorations; stale bars would silently mix two price feeds.
+        if state == "disconnected":
+            market_service.invalidate_symbols()
+
+    def _kick_market_on_connect(state: str, _detail: str) -> None:
+        # Skip the up-to-60s wait for the next refresh tick: fetch as soon
+        # as the terminal session is live so the Market page fills fast.
+        if state == "connected":
+            market_service.refresh_now()
+
+    bus.gateway_state_changed.connect(_reset_market_on_disconnect)
+    bus.gateway_state_changed.connect(_kick_market_on_connect)
+
     window = MainWindow(
         bus=bus,
         settings=settings,

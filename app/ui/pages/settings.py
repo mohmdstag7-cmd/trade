@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -53,6 +54,11 @@ from app.updater.worker import UpdateWorker
 
 _PROBE_POLL_MS = 150
 _STORAGE_POLL_MS = 2000
+
+#: characters that never appear in legitimate MT5 server names ("FIBOGroup-MT5
+#: Server", "MetaQuotes-Demo"); their presence usually means a secret (the
+#: password) was pasted into the Server field by mistake.
+_SERVER_SUSPICIOUS_RE = re.compile(r"[&!@$%^*+=~|<>{}\[\];?`#\"']")
 
 #: Maximum width of the centered settings column.
 COLUMN_WIDTH = 780
@@ -186,6 +192,11 @@ class SettingsPage(QWidget):
         self._server_edit.setPlaceholderText(
             translator.translate("settings.account.server.placeholder")
         )
+        self._server_hint = QLabel()
+        self._server_hint.setObjectName("FaintLabel")
+        self._server_hint.setWordWrap(True)
+        self._server_hint.hide()
+        self._server_edit.textChanged.connect(self._update_server_hint)
 
         self._terminal_label = QLabel()
         self._terminal_edit = QLineEdit()
@@ -206,6 +217,7 @@ class SettingsPage(QWidget):
 
         connection_form.addRow(self._login_label, self._login_edit)
         connection_form.addRow(self._server_label, self._server_edit)
+        connection_form.addRow(self._server_hint)
         connection_form.addRow(self._terminal_label, self._terminal_edit)
         connection_form.addRow(self._password_label, password_row)
         connection_layout.addWidget(self._connection_title)
@@ -486,6 +498,20 @@ class SettingsPage(QWidget):
             self._server_edit.setText(account.server)
         if account.terminal_path:
             self._terminal_edit.setText(account.terminal_path)
+        self._update_server_hint()
+
+    def _update_server_hint(self) -> None:
+        """Warn live when the server field does not look like an MT5 server.
+
+        A common slip is pasting the password (or a random secret) into the
+        Server field; the login then burns a silent timeout with zero feedback.
+        The hint is advisory — the user can still connect to odd-but-real names.
+        """
+        tr = self._translator.translate
+        server = self._server_edit.text().strip()
+        suspicious = bool(server) and _SERVER_SUSPICIOUS_RE.search(server) is not None
+        self._server_hint.setText(tr("settings.account.server.suspicious"))
+        self._server_hint.setVisible(suspicious)
 
     def _persist_account(self) -> int:
         """Copy the form into the settings store; return the parsed login."""
@@ -780,6 +806,7 @@ class SettingsPage(QWidget):
         self._test_button.setText(tr("settings.account.test_connection"))
         self._login_edit.setPlaceholderText(tr("settings.account.login.placeholder"))
         self._server_edit.setPlaceholderText(tr("settings.account.server.placeholder"))
+        self._update_server_hint()
         self._terminal_edit.setPlaceholderText(tr("settings.account.terminal_path.placeholder"))
         self._auto_connect_check.setText(tr("connect.auto"))
         connected = (

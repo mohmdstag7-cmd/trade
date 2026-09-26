@@ -263,6 +263,15 @@ class MarketPage(QWidget):
         # the chart colors itself via its own token application
         self._chart.apply_theme(self._theme.tokens)
 
+    def _render_empty_hint(self, snapshot: MarketSnapshot | None) -> None:
+        """Explain WHY the analysis area is empty (offline vs broker symbols)."""
+        tr = self._translator.translate
+        base = f"{tr('market.no_data')}\n\n{tr('market.empty.desc')}"
+        if snapshot is not None and snapshot.unresolved:
+            names = ", ".join(snapshot.unresolved)
+            base += f"\n\n{tr('market.empty.unresolved', symbols=names)}"
+        self._empty_label.setText(base)
+
     def _render(self) -> None:
         """Re-render everything from the latest service snapshot."""
         service = self._service
@@ -271,6 +280,7 @@ class MarketPage(QWidget):
         if snap is None:
             self._set_analysis_visible(False)
             self._chart.set_data([])
+            self._render_empty_hint(snapshot)
             return
         self._set_analysis_visible(True)
         self._render_card(snap)
