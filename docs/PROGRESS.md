@@ -11,7 +11,7 @@
 | 2 | Observability | **merged** | PR #9 |
 | 3 | MT5 connection (real) | **merged** | PR #14 |
 | 4 | Storage | **merged** | PR #17 |
-| 5 | Market data & analysis | not started | — |
+| 5 | Market data & analysis | **in review** | `phase/05-market-data` |
 | 6 | Strategies & signals | not started | — |
 | 7 | Risk | not started | — |
 | 8 | Execution | not started | — |
@@ -314,3 +314,97 @@ Settings card → Save → Test. Offline writes sync later without duplicates.
 - [x] History import (deal history → trades, idempotent).
 - [x] Daily backups (keep 7) + retention cleanup protecting business rows.
 
+
+---
+---
+
+## Phase 5 — Market data & analysis (in review)
+
+### Built
+
+- `app/core/timeframes.py` — `Timeframe` (StrEnum): bar durations, gateway
+  constant names, the analysis set (M15/H1/H4/D1).
+- `app/analysis/indicators.py` — self-built on numpy (SPEC C1): SMA, EMA
+  (SMA-seeded), Wilder RSI/ATR, ADX with ±DI, normalized slope. NaN until
+  defined; closed bars only.
+- `app/analysis/broker_time.py` — **BrokerClock**: detects the broker UTC
+  offset from live ticks (15-min quantum + majority vote, clamped to
+  UTC−12…+14), announces whole-hour DST changes, converts server epochs
+  ⇄ UTC, exposes the broker trading day (SPEC C2.4).
+- `app/analysis/market_data.py` — **MarketDataManager**: per
+  (symbol, timeframe) closed-bar cache with incremental merge/dedupe and a
+  bound; the still-forming bar never enters the series; sanity checks
+  (missing bars, zero volume, spikes > N × ATR, weekend gaps, time jumps,
+  stale ticks) with an `evaluable()` gate that blocks evaluation of a
+  poisoned newest bar (SPEC C2.2–C2.3).
+- `app/analysis/structure.py` — confirmed swings (strength bars each side,
+  `confirmed_index` = no look-ahead), HH/HL/LH/LL, BOS/CHoCH from confirmed
+  swings vs closed bars, trend/range classification (C3.2).
+- `app/analysis/levels.py` — S/R clustering of swing prices in ATR
+  tolerance, previous day/week H/L/C, session highs/lows (wrapping windows,
+  broker wall time), adaptive round-number grid, nearest-levels helper
+  (C3.3).
+- `app/analysis/volatility.py` — ATR percentile over a trailing window
+  (midrank), ADR excluding the forming day, % of ADR used today, regime
+  buckets low/normal/high (C3.4).
+- `app/analysis/sessions.py` — **SessionClock** over broker wall hours with
+  wrapping windows: current session, next transition, per-session extremes
+  (C3.5).
+- `app/analysis/trend.py` — per-timeframe rule assessment (EMA structure,
+  slope, ADX/±DI, RSI extremes) with reason keys; weighted overall bias
+  score −100…+100 (M15 1, H1 2, H4 3, D1 4) (C3.1).
+- `app/analysis/correlation.py` — rolling Pearson matrix of return tails +
+  currency strength meter (base adds / quote subtracts; metals move the
+  USD leg) (C3.6).
+- `app/analysis/spread.py` — **SpreadMonitor**: rolling per-(symbol, hour)
+  median; abnormal when > 2 × typical (C3.7).
+- `app/analysis/patterns.py` — engulfing / pin bar / inside bar on closed
+  bars; information and future ML features only (C3.8).
+- `app/analysis/card.py` — **AnalysisCard**: rule-generated plain-language
+  summary with i18n lines (EN/FA render), informational verdicts
+  (wait / watch / bias_up / bias_down), event & spread risk gating (C3.10).
+- `app/analysis/scanner.py` — per-symbol setup state (ready / forming /
+  none) with a documented |bias| × proximity proxy score until the ML
+  layer supplies calibrated probability × EV (C3.11).
+- `app/calendar/` — economic calendar (C3.9): `EventStore` (idempotent
+  merge, CSV round-trip, `upcoming()` / `risk_window()` queries),
+  `CalendarImporter` (UTF-8/BOM tolerant) + `ExporterFilePoller` (mtime
+  throttled); `mql5/CalendarExporter.mq5` — full EA source exporting
+  `CalendarValueHistory` to `Common\Files\mt5_workstation_calendar.csv`.
+- `app/analysis/service.py` — **MarketAnalysisService**: drives the whole
+  C3 pipeline through gateway futures (UI thread never blocks); computes
+  per-symbol snapshots only when a new closed bar appears; cross-symbol
+  correlation/strength/scanner; offline-safe (empty state until the
+  terminal connects).
+- UI: `app/ui/widgets/chart.py` — pyqtgraph candlestick chart (cached
+  `QPicture`, volume sub-plot, last-price line, theme tokens);
+  `app/ui/pages/market.py` — the Market page (symbol/timeframe selectors,
+  chart, analysis card, trend matrix, key levels, scanner strip, calendar
+  countdown, spread/broker badges) driven by 5 s poll + 60 s refresh
+  timers; status-bar clock now shows the broker wall time once the offset
+  is detected.
+
+### How to verify (your PC, Windows)
+
+```bat
+pip install -e ".[dev]"
+python -m app                 :: Market page: connect first on Settings
+:: after connecting: cards for EURUSD / GBPUSD / XAUUSD appear and refresh
+:: on every closed bar; switch symbols/timeframes; check the spread badge
+:: and the broker clock in the status bar.
+```
+
+Calendar (optional): attach `mql5/CalendarExporter.mq5` to any chart in
+your terminal (read-only EA) — events appear under Market → Economic
+calendar within minutes; or import a CSV manually.
+
+### Acceptance (SPEC G3-5)
+
+- [x] Data + sanity checks (C2.2–C2.3) with the evaluable gate — tested.
+- [x] Broker time / UTC offset detection with DST handling (C2.4) — tested.
+- [x] All C3 modules: trend matrix, structure, levels, volatility,
+      sessions, correlation/strength, spread, patterns, calendar, cards,
+      scanner — each unit-tested (C3.1–C3.11).
+- [x] Chart renders candles + volume + last price, theme-aware.
+- [x] Market page: cards for 3 symbols update on closed bars — verified
+      in CI with the fake gateway (real-terminal check happens on your PC).

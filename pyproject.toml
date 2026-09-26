@@ -23,6 +23,7 @@ classifiers = [
 dependencies = [
     "MetaTrader5==5.0.6180 ; sys_platform == 'win32'",
     "PySide6==6.11.2",
+    "pyqtgraph==0.13.7",
     "pandas==3.0.6",
     "numpy==2.4.2",
     "lightgbm==4.7.0",
@@ -109,6 +110,7 @@ module = [
     "supabase.*",
     "keyring.*",
     "pytestqt.*",
+    "pyqtgraph.*",
 ]
 ignore_missing_imports = true
 

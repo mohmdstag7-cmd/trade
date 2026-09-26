@@ -43,6 +43,7 @@ class MainWindow(QMainWindow):
         parent: QWidget | None = None,
         *,
         storage: Any | None = None,
+        market_analysis: Any | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("MainWindow")
@@ -52,6 +53,7 @@ class MainWindow(QMainWindow):
         self._theme_manager = theme_manager
         self._logs_page = logs_page
         self._storage = storage
+        self._market_analysis = market_analysis
 
         self.setWindowTitle(translator.translate("app.title"))
         self.setMinimumSize(1024, 640)
@@ -75,6 +77,15 @@ class MainWindow(QMainWindow):
                 )
             elif meta.key == "logs" and logs_page is not None:
                 page = logs_page
+            elif meta.key == "market":
+                from app.ui.pages.market import MarketPage
+
+                page = MarketPage(
+                    translator,
+                    theme_manager,
+                    self,
+                    service=market_analysis,
+                )
             else:
                 page = EmptyStatePage(meta, translator, self)
             self._pages[meta.key] = page
