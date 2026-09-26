@@ -163,8 +163,9 @@ CREATE TABLE IF NOT EXISTS trades (
     mfe_r                REAL,
     mae_r                REAL,
     predicted_probability REAL,
-    session_label        TEXT,
-    created_at           TEXT NOT NULL
+    session_label      TEXT,
+    comment            TEXT,
+    created_at         TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_trades_symbol    ON trades (symbol, open_time);
 CREATE INDEX IF NOT EXISTS idx_trades_open_time ON trades (open_time);

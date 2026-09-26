@@ -48,6 +48,7 @@ from app.mt5.models import (
     AccountSnapshot,
     ConnectionState,
     ConnectRequest,
+    DealSnapshot,
     GatewayStats,
     OrderResultSnapshot,
     PositionSnapshot,
@@ -187,6 +188,15 @@ class MT5Gateway:
     def positions(self, symbol: str | None = None) -> Future[tuple[PositionSnapshot, ...]]:
         """Open positions, optionally filtered by broker-side symbol."""
         return self._submit("positions", lambda: self._fetch_positions(symbol))
+
+    def history_deals(
+        self, date_from_epoch: int, date_to_epoch: int
+    ) -> Future[tuple[DealSnapshot, ...]]:
+        """Historical deals in ``[from, to)`` UTC epoch seconds (Phase 4)."""
+        return self._submit(
+            "history_deals",
+            lambda: self._fetch_deals(date_from_epoch, date_to_epoch),
+        )
 
     def order_send(self, request: dict[str, Any]) -> Future[OrderResultSnapshot]:
         """Send one trade request dict (low-level primitive for Phase 7+)."""
@@ -517,6 +527,18 @@ class MT5Gateway:
             for row in raw
         )
 
+    def _fetch_deals(self, date_from_epoch: int, date_to_epoch: int) -> tuple[DealSnapshot, ...]:
+        self._require_connected("history_deals")
+        import datetime as _dt
+
+        date_from = _dt.datetime.fromtimestamp(int(date_from_epoch), tz=_dt.UTC)
+        date_to = _dt.datetime.fromtimestamp(int(date_to_epoch), tz=_dt.UTC)
+        raw = self._require(
+            self._module.history_deals_get(date_from, date_to),
+            "history_deals_get",
+        )
+        return tuple(_to_deal_snapshot(deal) for deal in raw)
+
     def _fetch_positions(self, symbol: str | None) -> tuple[PositionSnapshot, ...]:
         self._require_connected("positions")
         raw = self._module.positions_get(symbol=symbol) if symbol else self._module.positions_get()
@@ -651,6 +673,26 @@ def _to_order_result_snapshot(result: Any) -> OrderResultSnapshot:
         volume=float(getattr(result, "volume", 0.0) or 0.0),
         price=float(getattr(result, "price", 0.0) or 0.0),
         comment=str(getattr(result, "comment", "") or ""),
+    )
+
+
+def _to_deal_snapshot(raw: Any) -> DealSnapshot:
+    return DealSnapshot(
+        ticket=int(getattr(raw, "ticket", 0)),
+        order=int(getattr(raw, "order", 0)),
+        time=int(getattr(raw, "time", 0)),
+        time_msc=int(getattr(raw, "time_msc", 0)),
+        type=int(getattr(raw, "type", 0)),
+        entry=int(getattr(raw, "entry", 0)),
+        magic=int(getattr(raw, "magic", 0)),
+        position_id=int(getattr(raw, "position_id", 0)),
+        symbol=str(getattr(raw, "symbol", "") or ""),
+        volume=float(getattr(raw, "volume", 0.0) or 0.0),
+        price=float(getattr(raw, "price", 0.0) or 0.0),
+        commission=float(getattr(raw, "commission", 0.0) or 0.0),
+        swap=float(getattr(raw, "swap", 0.0) or 0.0),
+        profit=float(getattr(raw, "profit", 0.0) or 0.0),
+        comment=str(getattr(raw, "comment", "") or ""),
     )
 
 

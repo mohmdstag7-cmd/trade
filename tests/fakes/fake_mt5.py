@@ -97,6 +97,26 @@ _SymbolInfo = namedtuple(
     ],
 )
 _Tick = namedtuple("Tick", ["time", "bid", "ask", "last", "volume"])
+_Deal = namedtuple(
+    "Deal",
+    [
+        "ticket",
+        "order",
+        "time",
+        "time_msc",
+        "type",
+        "entry",
+        "magic",
+        "position_id",
+        "symbol",
+        "volume",
+        "price",
+        "commission",
+        "swap",
+        "profit",
+        "comment",
+    ],
+)
 _TradePosition = namedtuple(
     "TradePosition",
     [
@@ -219,12 +239,14 @@ class FakeMetaTrader5:
         symbols: list[FakeSymbolConfig] | None = None,
         account: FakeAccountConfig | None = None,
         terminal: FakeTerminalConfig | None = None,
+        deals: list[_Deal] | None = None,
     ) -> None:
         if symbols is None:
             symbols = [FakeSymbolConfig("EURUSD")]
         self.symbols = {s.name.upper(): s for s in symbols}
         self.account = account or FakeAccountConfig()
         self.terminal = terminal or FakeTerminalConfig()
+        self.deals: list[_Deal] = list(deals or [])
 
         # module-level constants (the real package exposes them at module level)
         for const in (
@@ -506,6 +528,20 @@ class FakeMetaTrader5:
             0,
             0,
         )
+
+    def history_deals_get(
+        self, date_from: Any = None, date_to: Any = None
+    ) -> tuple[_Deal, ...]:
+        self._record("history_deals_get")
+        self._maybe_fail()
+        if not self.initialized:
+            self._error = (0, "not initialized")
+            return ()
+        if date_from is None or date_to is None:
+            return tuple(self.deals)
+        from_ts = int(date_from.timestamp()) if hasattr(date_from, "timestamp") else int(date_from)
+        to_ts = int(date_to.timestamp()) if hasattr(date_to, "timestamp") else int(date_to)
+        return tuple(d for d in self.deals if from_ts <= d.time < to_ts)
 
     def positions_get(self, symbol: str | None = None) -> tuple[_TradePosition, ...] | None:
         self._record("positions_get")
