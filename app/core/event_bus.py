@@ -27,3 +27,6 @@ class EventBus(QObject):
 
     #: Emitted when the MT5 connection verdict changed (ok, detail).
     mt5_connection_changed = Signal(bool, str)
+
+    #: Emitted when a symbol's market analysis snapshot changed (symbol).
+    market_analysis_changed = Signal(str)

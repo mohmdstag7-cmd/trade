@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import itertools
+
 import numpy as np
 import pytest
 
@@ -74,10 +76,10 @@ class TestFindSwings:
         lows_found = [s for s in swings if s.kind is SwingKind.LOW]
         assert len(highs_found) >= 2
         assert len(lows_found) >= 2
-        # alternating chronologically
+        # swings alternate between highs and lows (outside bars aside)
         seq = [s.kind for s in swings]
-        for a, b in zip(seq, seq[1:]):
-            assert a != b or True  # outside bars aside, mostly alternating
+        alternating = sum(1 for a, b in itertools.pairwise(seq) if a is not b)
+        assert alternating >= len(seq) - 2
 
 
 class TestClassify:
@@ -104,9 +106,7 @@ class TestClassify:
 class TestEvents:
     def test_bos_continuation(self) -> None:
         # clean uptrend: two confirmed highs, each broken by later closes
-        highs, lows, closes = zigzag(
-            [10, 12, 10.5, 13, 11, 14, 12.5, 15], leg=3
-        )
+        highs, lows, closes = zigzag([10, 12, 10.5, 13, 11, 14, 12.5, 15], leg=3)
         swings = find_swings(highs, lows, strength=2)
         events = detect_events(swings, closes)
         bos_events = [e for e in events if e.type is EventType.BOS]
@@ -115,9 +115,7 @@ class TestEvents:
 
     def test_choch_against_trend(self) -> None:
         # uptrend then a deep reversal below the last higher low
-        highs, lows, closes = zigzag(
-            [10, 12, 10.5, 13, 11, 14, 12, 9], leg=3
-        )
+        highs, lows, closes = zigzag([10, 12, 10.5, 13, 11, 14, 12, 9], leg=3)
         swings = find_swings(highs, lows, strength=2)
         events = detect_events(swings, closes)
         assert any(e.type is EventType.CHOCH and e.direction == -1 for e in events)
@@ -144,9 +142,7 @@ class TestClassifyTrend:
 
     def test_range(self) -> None:
         # last high lower AND last low higher → compression
-        highs, lows, _ = zigzag(
-            [12, 10, 12.1, 9.9, 11.9, 10.1, 11.5, 10.4, 11.0], leg=3
-        )
+        highs, lows, _ = zigzag([12, 10, 12.1, 9.9, 11.9, 10.1, 11.5, 10.4, 11.0], leg=3)
         swings = find_swings(highs, lows, strength=2)
         assert classify_trend(swings) is TrendKind.RANGE
 
@@ -158,7 +154,7 @@ class TestNoLookaheadProperty:
     def test_swings_never_confirmed_after_end(self) -> None:
         rng = np.random.default_rng(11)
         highs = list(100 + rng.normal(0, 1.0, 200))
-        lows = [h - abs(d) for h, d in zip(highs, rng.normal(0, 0.5, 200))]
+        lows = [h - abs(d) for h, d in zip(highs, rng.normal(0, 0.5, 200), strict=False)]
         swings = find_swings(highs, lows, strength=2)
         n = len(highs)
         assert all(s.confirmed_index < n for s in swings)

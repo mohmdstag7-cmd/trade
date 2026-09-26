@@ -335,6 +335,46 @@ def run_db_check(args: argparse.Namespace) -> int:
     return 0 if stats["integrity_ok"] else 1
 
 
+def _build_market_service() -> Any:
+    """Create the Phase 5 market analysis service (gateway optional).
+
+    One long-lived gateway is owned by the app shell and shared with the
+    analysis pipeline; the Settings card keeps its one-shot probes (the
+    engine phases consolidate ownership). The calendar store lives under
+    the data dir and is fed by the MQL5 exporter CSV (SPEC C3.9).
+    """
+    import time as _time
+
+    from app.analysis.broker_time import BrokerClock
+    from app.analysis.service import MarketAnalysisService
+    from app.calendar.events import EventStore
+    from app.calendar.importer import ExporterFilePoller
+    from app.mt5.gateway import MT5Gateway
+
+    gateway: MT5Gateway | None = None
+    try:
+        gateway = MT5Gateway(mt5_factory=_import_mt5, request_timeout_s=30.0)
+        gateway.start()
+    except Exception:  # pragma: no cover - never block startup on MT5
+        import loguru
+
+        loguru.logger.warning("market: MT5 gateway unavailable — analysis offline")
+        gateway = None
+
+    calendar_dir = default_data_dir() / "calendar"
+    calendar_dir.mkdir(parents=True, exist_ok=True)
+    store = EventStore(calendar_dir / "events.csv")
+    poller = ExporterFilePoller(store, calendar_dir / "exporter.csv", interval_s=300.0)
+    clock = BrokerClock(utc_now_fn=_time.time)
+    return MarketAnalysisService(
+        gateway,
+        watched=("EURUSD", "GBPUSD", "XAUUSD"),
+        clock=clock,
+        calendar_store=store,
+        calendar_poller=poller,
+    )
+
+
 def run_gui(debug: bool = False) -> int:
     """Compose the application and start the Qt event loop."""
     log_state = init_logging(logs_dir=default_logs_dir(), debug=debug)
@@ -390,6 +430,11 @@ def run_gui(debug: bool = False) -> int:
         storage = None
 
     logs_page = LogsPage(translator, log_state.ring, log_state.logs_dir)
+
+    # Market analysis (Phase 5): the gateway is optional — the page shows an
+    # offline empty state until the user connects on the Settings page.
+    market_service = _build_market_service()
+
     window = MainWindow(
         bus=bus,
         settings=settings,
@@ -397,6 +442,7 @@ def run_gui(debug: bool = False) -> int:
         theme_manager=theme_manager,
         logs_page=logs_page,
         storage=storage,
+        market_analysis=market_service,
     )
     window.show()
     exit_code = qt_app.exec()

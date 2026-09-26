@@ -7,7 +7,7 @@ broker-offset detection arrives with Phase 5.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 
 def utc_now() -> datetime:
@@ -20,3 +20,14 @@ def format_local_time(dt: datetime | None = None) -> str:
     if dt is None:
         dt = utc_now()
     return dt.astimezone().strftime("%H:%M:%S")
+
+
+def broker_time_string(offset_minutes: int, dt: datetime | None = None) -> str:
+    """Format the broker wall clock (local HH:MM:SS + offset minutes).
+
+    Broker wall time = UTC + the detected server offset (SPEC C2.4).
+    """
+    if dt is None:
+        dt = utc_now()
+    broker = dt + timedelta(minutes=offset_minutes)
+    return broker.strftime("%H:%M:%S")

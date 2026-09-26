@@ -106,7 +106,9 @@ def true_range(
     if not (h.shape[0] == lows_a.shape[0] == c.shape[0]):
         raise ValueError("highs/lows/closes must have the same length")
     prev_close = np.concatenate(([c[0]], c[:-1]))
-    tr = np.maximum(h - lows_a, np.maximum(np.abs(h - prev_close), np.abs(lows_a - prev_close)))
+    tr: np.ndarray = np.maximum(
+        h - lows_a, np.maximum(np.abs(h - prev_close), np.abs(lows_a - prev_close))
+    )
     return tr
 
 

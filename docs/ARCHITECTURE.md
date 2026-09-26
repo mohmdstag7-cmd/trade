@@ -210,3 +210,20 @@ a crash mid-migration roll the whole step back.
 - Phase 12: AI loop + Go-Live gate.
 - Phase 13: health/soak hardening.
 - Phase 14: Persian/RTL polish, light theme QA, installer finalization.
+
+### ADR-0015 — Analysis layering: pure domain, gateway-futures driver (Phase 5)
+
+`app/analysis/` never imports MetaTrader5 or PySide6. Bars enter as
+`RateBar` dataclasses; `MarketAnalysisService` drives the pipeline through
+the shared gateway's futures and recomputes only on new closed bars. The
+UI renders snapshots and never blocks. The forming bar is stripped at the
+data-manager boundary so closed-bar evaluation (SPEC C7, I-4) holds by
+construction, and `evaluable()` gates evaluation on poisoned bars.
+
+### ADR-0016 — Calendar by CSV export, not API (Phase 5)
+
+The MetaTrader5 Python package cannot read the MT5 economic calendar, so
+the app owns a UTC event store fed by (a) manual/CSV import and (b) the
+bundled `CalendarExporter.mq5` EA writing `Common\Files\...csv` every
+minute; an mtime-throttled poller imports it. Merge semantics are
+idempotent (time + currency + title = same event).

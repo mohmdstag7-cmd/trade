@@ -12,7 +12,7 @@ from collections.abc import Callable
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QLabel, QPushButton, QStatusBar, QWidget
 
-from app.core.clock import format_local_time
+from app.core.clock import broker_time_string, format_local_time
 from app.ui.i18n.translator import Translator
 
 
@@ -75,6 +75,9 @@ class StatusBar(QStatusBar):
         self._kill_switch.setEnabled(False)
         self.addPermanentWidget(self._kill_switch)
 
+        self._broker_offset: int | None = None
+        self._broker_offset_text = ""
+
         self._clock = QTimer(self)
         self._clock.setInterval(1000)
         self._clock.timeout.connect(self._update_clock)
@@ -97,16 +100,35 @@ class StatusBar(QStatusBar):
         self._connection_label.setToolTip(tooltip)
         self._dot.setToolTip(tooltip)
 
+    def set_broker_offset(self, offset_minutes: int | None, offset_text: str = "") -> None:
+        """Show the broker wall clock once the offset is detected (Phase 5)."""
+        self._broker_offset = offset_minutes
+        self._broker_offset_text = offset_text
+        self._update_clock()
+
     # -- internals ---------------------------------------------------------------
     def _update_clock(self) -> None:
-        self._clock_label.setText(format_local_time())
+        parts = [format_local_time()]
+        if self._broker_offset is not None:
+            broker = broker_time_string(self._broker_offset)
+            parts.append(f"{self._broker_offset_text} {broker}")
+        self._clock_label.setText("  ·  ".join(parts))
 
     def retranslate(self) -> None:
         """Refresh all texts for the current language."""
         tr = self._translator.translate
         self.set_connection_state(False)
         self._mode_badge.setText(tr("status.mode.none"))
-        self._clock_label.setToolTip(tr("status.clock.tooltip"))
+        if self._broker_offset is not None:
+            self._clock_label.setToolTip(
+                tr(
+                    "status.clock.tooltip.broker",
+                    offset=self._broker_offset_text,
+                    time=broker_time_string(self._broker_offset),
+                )
+            )
+        else:
+            self._clock_label.setToolTip(tr("status.clock.tooltip"))
         self._theme_button.setToolTip(tr("status.theme.tooltip"))
         self._language_button.setToolTip(tr("status.language.tooltip"))
         self._kill_switch.setText(tr("status.killswitch"))
