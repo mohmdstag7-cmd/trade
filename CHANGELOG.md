@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versions are managed automatically by [release-please](https://github.com/googleapis/release-please)
 from Conventional Commits.
 
+## [0.4.0](https://github.com/mohmdstag7-cmd/trade/compare/v0.3.0...v0.4.0) (2026-09-26)
+
+
+### Features
+
+* **cloud:** Supabase mirror schema, RLS and performance views with setup guide ([d9ed432](https://github.com/mohmdstag7-cmd/trade/commit/d9ed43203d4985011da9c2d9bebaf285ea6cf1b9))
+* **storage:** audit service, daily backups, retention cleanup, WARNING+ log sink ([20f9c18](https://github.com/mohmdstag7-cmd/trade/commit/20f9c18ea12b27f87344168b58b2fed1e5a62a92))
+* **storage:** idempotent trade history import from MT5 deal history ([78d2957](https://github.com/mohmdstag7-cmd/trade/commit/78d29571555b98d0d8b96432de67546dcd648366))
+* **storage:** outbox worker, Supabase mirror and keyring vault ([f8cab64](https://github.com/mohmdstag7-cmd/trade/commit/f8cab643a8b656d75eaebb00d1e14a05e854dfcb))
+* **storage:** SQLite core with WAL, migrations and outbox-backed repositories ([c661f1c](https://github.com/mohmdstag7-cmd/trade/commit/c661f1c7120da591aeeb00b0b18e3704db6d11bc))
+* **storage:** SQLite core with WAL, migrations and outbox-backed repositories ([fbb1534](https://github.com/mohmdstag7-cmd/trade/commit/fbb153420719fa409462544d2b8b8da65437c7a2))
+* **storage:** StorageService facade, --db-check CLI and storage self-check gate ([a652666](https://github.com/mohmdstag7-cmd/trade/commit/a6526663b5d195905d53cb6b77b89e5a69d2cdc6))
+* **ui:** Storage & Sync settings card with Supabase probe and audit wiring ([ffaa583](https://github.com/mohmdstag7-cmd/trade/commit/ffaa583d16146e50bd43f894914d9e5dbdcceb08))
+
+
+### Bug Fixes
+
+* **storage:** close backup destination handle; Args class resolution in db-check tests ([bb35c8f](https://github.com/mohmdstag7-cmd/trade/commit/bb35c8f573997c5acbcc66ee790164e9264bcfc9))
+
+
+### Documentation
+
+* phase 4 architecture decisions, progress and cloud setup guide ([3941bfa](https://github.com/mohmdstag7-cmd/trade/commit/3941bfa23865b5197b03f1e774260cadff03b030))
+
 ## [0.3.0](https://github.com/mohmdstag7-cmd/trade/compare/v0.2.1...v0.3.0) (2026-09-26)
 
 
