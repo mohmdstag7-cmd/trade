@@ -4,6 +4,7 @@ idempotent migration runner (SPEC E1)."""
 from __future__ import annotations
 
 import pathlib
+import sqlite3
 import threading
 
 import pytest
@@ -89,10 +90,9 @@ class TestDatabase:
 
     def test_transaction_rollback_on_error(self, db: Database) -> None:
         db.execute("CREATE TABLE t (x INTEGER UNIQUE)")
-        with pytest.raises(Exception):  # noqa: B017, PT011
-            with db.transaction():
-                db.execute("INSERT INTO t VALUES (1)")
-                db.execute("INSERT INTO t VALUES (1)")  # UNIQUE violation
+        with pytest.raises(sqlite3.IntegrityError), db.transaction():
+            db.execute("INSERT INTO t VALUES (1)")
+            db.execute("INSERT INTO t VALUES (1)")  # UNIQUE violation
         assert db.row_count("t") == 0
 
     def test_nested_transaction_reuses_outer(self, db: Database) -> None:
@@ -193,7 +193,7 @@ class TestMigrationRunner:
             Migration(version=2, name="bad", sql="CREATE TABLE bad AS SELECT nope FROM missing"),
         )
         runner2 = MigrationRunner(database, bad)
-        with pytest.raises(Exception):  # noqa: B017, PT011
+        with pytest.raises(Exception):  # noqa: B017
             runner2.run_all()
 
         versions = [

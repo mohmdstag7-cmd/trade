@@ -96,7 +96,7 @@ class BaseRepository:
         columns = sorted(row)
         placeholders = ", ".join("?" for _ in columns)
         quoted = ", ".join(f'"{c}"' for c in columns)
-        sql = f'INSERT INTO "{self.table}" ({quoted}) VALUES ({placeholders})'  # noqa: S608
+        sql = f'INSERT INTO "{self.table}" ({quoted}) VALUES ({placeholders})'
 
         with self._db.transaction():
             self._db.execute(sql, [row[c] for c in columns])
@@ -120,7 +120,7 @@ class BaseRepository:
             return True
         columns = sorted(changes)
         assignments = ", ".join(f'"{c}" = ?' for c in columns)
-        sql = f'UPDATE "{self.table}" SET {assignments} WHERE id = ?'  # noqa: S608
+        sql = f'UPDATE "{self.table}" SET {assignments} WHERE id = ?'
         with self._db.transaction():
             self._db.execute(sql, [changes[c] for c in columns] + [row_id])
             if self._mirrored:
@@ -129,7 +129,7 @@ class BaseRepository:
 
     # -- read --------------------------------------------------------------------
     def get(self, row_id: str) -> dict[str, Any] | None:
-        rows = self._db.query(f'SELECT * FROM "{self.table}" WHERE id = ?', (row_id,))  # noqa: S608
+        rows = self._db.query(f'SELECT * FROM "{self.table}" WHERE id = ?', (row_id,))
         return dict(rows[0]) if rows else None
 
     def exists(self, row_id: str) -> bool:
@@ -139,14 +139,14 @@ class BaseRepository:
         return self._db.row_count(self.table)
 
     def recent(self, limit: int = 50, order_by: str = "created_at") -> list[dict[str, Any]]:
-        rows = self._db.query(  # noqa: S608
+        rows = self._db.query(
             f'SELECT * FROM "{self.table}" ORDER BY "{order_by}" DESC LIMIT ?',
             (limit,),
         )
         return [dict(r) for r in rows]
 
     def delete(self, row_id: str) -> None:
-        self._db.execute(f'DELETE FROM "{self.table}" WHERE id = ?', (row_id,))  # noqa: S608
+        self._db.execute(f'DELETE FROM "{self.table}" WHERE id = ?', (row_id,))
 
 
 class OutboxRepository:
@@ -320,7 +320,7 @@ class TradeRepository(BaseRepository):
         quoted = ", ".join(f'"{c}"' for c in columns)
         with self._db.transaction():
             self._db.execute(
-                f"INSERT INTO trades ({quoted}) VALUES ({placeholders})",  # noqa: S608
+                f"INSERT INTO trades ({quoted}) VALUES ({placeholders})",
                 [row[c] for c in columns],
             )
             OutboxRepository(self._db).enqueue("trades", str(row["id"]), row)
@@ -371,9 +371,6 @@ class HealthCheckRepository(BaseRepository):
 
     def record(self, component: str, status: str, detail: str = "") -> str:
         return self.insert({"component": component, "status": status, "detail": detail})
-
-    def recent(self, limit: int = 100) -> list[dict[str, Any]]:
-        return super().recent(limit=limit)
 
 
 class Mt5RequestRepository(BaseRepository):

@@ -19,6 +19,7 @@ The module never stores or logs secrets (SPEC I-6).
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 import threading
 from collections.abc import Iterator
@@ -99,7 +100,8 @@ class Database:
 
     def query_one(self, sql: str, params: tuple | list = ()) -> sqlite3.Row | None:
         """Fetch a single row or ``None``."""
-        return self.execute(sql, params).fetchone()
+        row: sqlite3.Row | None = self.execute(sql, params).fetchone()
+        return row
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -129,10 +131,8 @@ class Database:
         """Close the calling thread's connection (e.g. a worker shutting down)."""
         conn: sqlite3.Connection | None = getattr(self._local, "conn", None)
         if conn is not None:
-            try:
+            with contextlib.suppress(sqlite3.Error):  # close is best effort
                 conn.close()
-            except sqlite3.Error:  # pragma: no cover - close is best effort
-                pass
             self._local.conn = None
             with self._all_conns_lock:
                 if conn in self._all_conns:
@@ -143,10 +143,8 @@ class Database:
         with self._all_conns_lock:
             conns = list(self._all_conns)
         for conn in conns:
-            try:
+            with contextlib.suppress(sqlite3.Error):
                 conn.close()
-            except sqlite3.Error:  # pragma: no cover
-                pass
         with self._all_conns_lock:
             self._all_conns.clear()
         self._local = threading.local()
@@ -165,7 +163,7 @@ class Database:
         """Row count of ``table`` (0 when the table does not exist)."""
         if table not in self.table_names():
             return 0
-        row = self.query_one(f'SELECT COUNT(*) AS n FROM "{table}"')  # noqa: S608
+        row = self.query_one(f'SELECT COUNT(*) AS n FROM "{table}"')
         return int(row["n"]) if row is not None else 0
 
     def size_bytes(self) -> int:
