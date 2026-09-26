@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versions are managed automatically by [release-please](https://github.com/googleapis/release-please)
 from Conventional Commits.
 
+## [0.6.4](https://github.com/mohmdstag7-cmd/trade/compare/v0.6.3...v0.6.4) (2026-09-26)
+
+
+### Bug Fixes
+
+* **updater:** make staged updates actually install on restart ([b277b2f](https://github.com/mohmdstag7-cmd/trade/commit/b277b2fc8ad405965201e5cec2ebfccfa70e3533))
+* **updater:** make staged updates actually install on restart ([e93f0ea](https://github.com/mohmdstag7-cmd/trade/commit/e93f0ea6cd8bc78f5b5cde57fcc7fe0d6b98021b))
+
 ## [0.6.3](https://github.com/mohmdstag7-cmd/trade/compare/v0.6.2...v0.6.3) (2026-09-26)
 
 
