@@ -202,14 +202,12 @@ def apply_script_payload(
         "goto waitloop",
         ":forcekill",
         'echo app still running after 90s — force closing >> "%LOG%"',
-        'taskkill /PID %TARGET_PID% /F >nul 2>&1',
+        "taskkill /PID %TARGET_PID% /F >nul 2>&1",
         "ping -n 4 127.0.0.1 >nul",
         ":waitdone",
         'echo app exited — applying staged tree >> "%LOG%"',
     ]
-    lines.extend(
-        f'del /f /q "%APP_DIR%\\{rel.replace("/", chr(92))}" 2>nul' for rel in removed
-    )
+    lines.extend(f'del /f /q "%APP_DIR%\\{rel.replace("/", chr(92))}" 2>nul' for rel in removed)
     lines += [
         'robocopy "%STAGE%" "%APP_DIR%" /E /NFL /NDL /NJH /NJS /NP /R:2 /W:1 >> "%LOG%" 2>&1',
         "set rc=!errorlevel!",

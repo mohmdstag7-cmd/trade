@@ -225,7 +225,10 @@ class TestApplyScriptRobustness:
     def test_every_step_is_logged(self) -> None:
         payload = self._payload()
         assert "update-apply.log" in payload
-        assert 'robocopy "%STAGE%" "%APP_DIR%" /E /NFL /NDL /NJH /NJS /NP /R:2 /W:1 >> "%LOG%"' in payload
+        assert (
+            'robocopy "%STAGE%" "%APP_DIR%" /E /NFL /NDL /NJH /NJS /NP /R:2 /W:1 >> "%LOG%"'
+            in payload
+        )
         assert "robocopy exit=!rc!" in payload
         assert "apply FAILED" in payload
         assert "apply OK" in payload
@@ -338,7 +341,9 @@ class TestCleanupStaleArtifacts:
     def test_download_and_stage_cleans_before_staging(
         self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr("app.updater.service.UpdateService.enabled", property(lambda self: True))
+        monkeypatch.setattr(
+            "app.updater.service.UpdateService.enabled", property(lambda self: True)
+        )
         app_dir = tmp_path / "MT5TradingWorkstation"
         _make_tree(app_dir, {"app.exe": b"old"})
         (app_dir / "manifest.json").write_text(

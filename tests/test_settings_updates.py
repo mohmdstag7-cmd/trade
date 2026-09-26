@@ -92,7 +92,9 @@ class TestResumePendingUpdate:
     def test_pending_staged_update_surfaces_restart_button(
         self, translator, theme_manager, account, qtbot, tmp_path
     ) -> None:
-        page = _make_page(translator, theme_manager, account, qtbot, _StubUpdater(tmp_path, "0.6.3"))
+        page = _make_page(
+            translator, theme_manager, account, qtbot, _StubUpdater(tmp_path, "0.6.3")
+        )
         page.resume_pending_update()
         assert page._staged_version == "0.6.3"
         assert page._update_restart_button.isVisibleTo(page)
@@ -113,7 +115,11 @@ class TestResumePendingUpdate:
         self, translator, theme_manager, account, qtbot, tmp_path
     ) -> None:
         page = _make_page(
-            translator, theme_manager, account, qtbot, _StubUpdater(tmp_path, "0.6.3", enabled=False)
+            translator,
+            theme_manager,
+            account,
+            qtbot,
+            _StubUpdater(tmp_path, "0.6.3", enabled=False),
         )
         page.resume_pending_update()
         assert page._staged_version is None
@@ -137,7 +143,9 @@ class TestRestartAndInstall:
 
         monkeypatch.setattr(subprocess, "Popen", explode)
         monkeypatch.setattr("app.ui.pages.settings.os.name", "nt")
-        page = _make_page(translator, theme_manager, account, qtbot, _StubUpdater(tmp_path, "0.6.3"))
+        page = _make_page(
+            translator, theme_manager, account, qtbot, _StubUpdater(tmp_path, "0.6.3")
+        )
         page._staged_version = "0.6.3"
         page._on_restart_and_install()
         assert page._update_status_label.text() == translator.translate("updates.staged_missing")
@@ -153,7 +161,9 @@ class TestRestartAndInstall:
         tmp_path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        page = _make_page(translator, theme_manager, account, qtbot, _StubUpdater(tmp_path, "0.6.3"))
+        page = _make_page(
+            translator, theme_manager, account, qtbot, _StubUpdater(tmp_path, "0.6.3")
+        )
         script = page._updater.apply_script_path("0.6.3")
         script.write_text("@echo off\r\n", encoding="ascii")
 
@@ -181,7 +191,9 @@ class TestRestartAndInstall:
         tmp_path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        page = _make_page(translator, theme_manager, account, qtbot, _StubUpdater(tmp_path, "0.6.3"))
+        page = _make_page(
+            translator, theme_manager, account, qtbot, _StubUpdater(tmp_path, "0.6.3")
+        )
         script = page._updater.apply_script_path("0.6.3")
         script.write_text("@echo off\r\n", encoding="ascii")
 
@@ -213,7 +225,9 @@ class TestRestartAndInstall:
             raise AssertionError("Popen must not run off Windows")
 
         monkeypatch.setattr(subprocess, "Popen", explode)
-        page = _make_page(translator, theme_manager, account, qtbot, _StubUpdater(tmp_path, "0.6.3"))
+        page = _make_page(
+            translator, theme_manager, account, qtbot, _StubUpdater(tmp_path, "0.6.3")
+        )
         page._staged_version = "0.6.3"
         # os.name is "posix" on CI — the guidance branch fires naturally
         page._on_restart_and_install()
