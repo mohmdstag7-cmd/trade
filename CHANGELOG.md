@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versions are managed automatically by [release-please](https://github.com/googleapis/release-please)
 from Conventional Commits.
 
+## [0.6.3](https://github.com/mohmdstag7-cmd/trade/compare/v0.6.2...v0.6.3) (2026-09-26)
+
+
+### Bug Fixes
+
+* **market:** resolve broker symbol suffixes — Market page stayed empty ([a546f56](https://github.com/mohmdstag7-cmd/trade/commit/a546f56f4a3cb815bff5c334a71eab3eb20ec7d0))
+* **market:** resolve broker symbol suffixes — Market page stayed empty ([8b88eee](https://github.com/mohmdstag7-cmd/trade/commit/8b88eeeeaf1291ea8a9e55c9972685f9829d33b0))
+
 ## [0.6.2](https://github.com/mohmdstag7-cmd/trade/compare/v0.6.1...v0.6.2) (2026-09-26)
 
 
