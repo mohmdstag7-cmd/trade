@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versions are managed automatically by [release-please](https://github.com/googleapis/release-please)
 from Conventional Commits.
 
+## [0.5.0](https://github.com/mohmdstag7-cmd/trade/compare/v0.4.1...v0.5.0) (2026-09-26)
+
+
+### Features
+
+* **analysis:** market structure, key levels, volatility and sessions ([488e52d](https://github.com/mohmdstag7-cmd/trade/commit/488e52d35d3cc014349cf5bb2cdaa4a20a1bdf76))
+* **analysis:** timeframes, self-built indicators, broker clock and data manager ([d4f2045](https://github.com/mohmdstag7-cmd/trade/commit/d4f2045a632880eec16343d5a60da27a31a16d5e))
+* **analysis:** trend matrix, correlation, spread, patterns, cards, scanner ([510ee1c](https://github.com/mohmdstag7-cmd/trade/commit/510ee1c0722ccf7de73cc9d742685eb3fcc2d110))
+* **calendar:** economic event store, CSV import and MQL5 exporter EA ([3032a59](https://github.com/mohmdstag7-cmd/trade/commit/3032a59b3b14c344bc8c67f391cce58d6e442b23))
+* Phase 5 — Market data & analysis (C2/C3 modules, chart, Market page, calendar) ([e5d1b62](https://github.com/mohmdstag7-cmd/trade/commit/e5d1b62975fb42e8762eb7bd0df95ccabd07ccf8))
+* **ui:** market page, candlestick chart and analysis service orchestration ([b351fec](https://github.com/mohmdstag7-cmd/trade/commit/b351fec53e28630198a3918ad5b6f10d5c7d2a9c))
+
 ## [0.4.1](https://github.com/mohmdstag7-cmd/trade/compare/v0.4.0...v0.4.1) (2026-09-26)
 
 
