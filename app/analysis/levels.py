@@ -8,7 +8,7 @@ from enum import StrEnum
 
 import numpy as np
 
-from app.analysis.structure import Swing, SwingKind
+from app.analysis.structure import Swing
 from app.mt5.models import RateBar
 
 
