@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versions are managed automatically by [release-please](https://github.com/googleapis/release-please)
 from Conventional Commits.
 
+## [0.6.2](https://github.com/mohmdstag7-cmd/trade/compare/v0.6.1...v0.6.2) (2026-09-26)
+
+
+### Bug Fixes
+
+* **ui:** read gateway.state as property — startup crash in settings page ([37f4501](https://github.com/mohmdstag7-cmd/trade/commit/37f4501189bf32b5033d821a78198c6e9a57d634))
+* **ui:** read gateway.state as property — startup crash in settings page ([942e4d2](https://github.com/mohmdstag7-cmd/trade/commit/942e4d28dad8e473098a2e0c64282d9dae82ce32))
+
 ## [0.6.1](https://github.com/mohmdstag7-cmd/trade/compare/v0.6.0...v0.6.1) (2026-09-26)
 
 

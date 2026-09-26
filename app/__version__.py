@@ -6,4 +6,4 @@ updater rewrites; the ``extra-files`` entry in
 ``release-please-config.json`` points it here). Do not edit manually.
 """
 
-__version__ = "0.6.1"  # x-release-please-version
+__version__ = "0.6.2"  # x-release-please-version
