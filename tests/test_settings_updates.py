@@ -225,6 +225,8 @@ class TestRestartAndInstall:
             raise AssertionError("Popen must not run off Windows")
 
         monkeypatch.setattr(subprocess, "Popen", explode)
+        # force the off-Windows branch regardless of the host platform
+        monkeypatch.setattr("app.ui.pages.settings.os.name", "posix")
         page = _make_page(
             translator, theme_manager, account, qtbot, _StubUpdater(tmp_path, "0.6.3")
         )

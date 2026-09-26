@@ -251,6 +251,10 @@ class TestApplyScriptRobustness:
 def test_ascii_safe_path_is_identity_off_windows(tmp_path: pathlib.Path) -> None:
     from app.updater.service import ascii_safe_path
 
+    if sys.platform == "win32":  # pragma: no cover - CI runs both platforms
+        # On Windows the helper may legitimately return an 8.3 alias; the
+        # identity contract only holds off-Windows.
+        pytest.skip("identity contract is non-Windows specific")
     assert ascii_safe_path(tmp_path) == tmp_path
 
 
