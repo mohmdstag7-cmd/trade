@@ -627,7 +627,12 @@ class SettingsPage(QWidget):
             server=server,
             terminal_path=self._account_settings.terminal_path,
         )
-        self._probe = ConnectionProbe(request, self._mt5_factory)
+        # Borrow the shared gateway when present: a private probe gateway
+        # would re-initialize the process-global MetaTrader5 module and
+        # silently kill a live persistent session (zombie "connected" state).
+        self._probe = ConnectionProbe(
+            request, self._mt5_factory, shared_gateway=self._shared_gateway
+        )
         self._probe.start()
         self._test_button.setEnabled(False)
         self._result_label.setText(

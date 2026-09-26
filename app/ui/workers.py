@@ -12,6 +12,10 @@ from typing import Any
 
 from PySide6.QtCore import QThread, Signal
 
+from app.observability.logger import get_logger
+
+log = get_logger("mt5")
+
 
 class ConnectWorker(QThread):
     """Connect (or disconnect) the shared gateway in the background."""
@@ -46,4 +50,7 @@ class ConnectWorker(QThread):
                 self._gateway.wait_for_result(future, "disconnect", 15.0)
                 self.result_ready.emit(True, "")
         except Exception as exc:  # MT5Error, timeouts, shutdown races
+            # The settings label shows the verdict; the log keeps the full
+            # reason (last_error text, timeout hints) for later diagnosis.
+            log.warning("connect worker: {} failed: {}", self._mode, exc)
             self.result_ready.emit(False, str(exc))

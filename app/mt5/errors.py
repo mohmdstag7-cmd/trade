@@ -241,10 +241,18 @@ class InvalidSymbolError(MT5Error):
 class GatewayTimeoutError(MT5Error):
     """A gateway command did not finish within its timeout."""
 
+    #: Shown when a *connect* outlives its timeout: a cold terminal start
+    #  (terminal64.exe launching, broker login servers warming up) routinely
+    #  takes a minute — the user should retry, not assume the app is broken.
+    _CONNECT_HINT = " — the terminal may still be starting up; wait a moment and try again"
+
     def __init__(self, operation: str, timeout_s: float) -> None:
         self.operation = operation
         self.timeout_s = timeout_s
-        super().__init__(code=0, description=f"{operation} timed out after {timeout_s:.1f}s")
+        description = f"{operation} timed out after {timeout_s:.1f}s"
+        if operation == "connect":
+            description += self._CONNECT_HINT
+        super().__init__(code=0, description=description)
 
 
 def _result_code(result: Any) -> int:

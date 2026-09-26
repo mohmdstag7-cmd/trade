@@ -254,6 +254,11 @@ class UpdateService:
         return getattr(sys, "frozen", False)
 
     @property
+    def current_version(self) -> str:
+        """The version this service is updating from."""
+        return self._current_version
+
+    @property
     def app_dir(self) -> pathlib.Path:
         """The installed app tree this service updates."""
         return self._app_dir

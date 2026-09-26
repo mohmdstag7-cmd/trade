@@ -20,7 +20,7 @@ from typing import Any
 
 from app.mt5.errors import MT5Error, friendly_message
 from app.mt5.gateway import MT5Gateway
-from app.mt5.models import ConnectRequest, mask_login
+from app.mt5.models import ConnectionState, ConnectRequest, mask_login
 from app.mt5.symbols import DEFAULT_WATCHLIST, SymbolResolver
 from app.observability.logger import get_logger
 
@@ -114,7 +114,7 @@ def run_smoke_test(
     """Run the full read-only diagnostic suite. Blocking — CLI only."""
     started = time.monotonic()
     report = SmokeTestReport()
-    gateway = MT5Gateway(mt5_factory=mt5_factory, request_timeout_s=timeout_s)
+    gateway = MT5Gateway(mt5_factory=mt5_factory, request_timeout_s=timeout_s, name="smoke")
     gateway.start()
 
     def step(name: str) -> _StepRecorder:
@@ -310,11 +310,22 @@ class ProbeState:
 
 
 class ConnectionProbe:
-    """One-shot connect→info→disconnect sequence on its own gateway.
+    """One-shot connect→info→disconnect sequence.
 
-    The UI calls :meth:`start` once, then :meth:`poll` from a QTimer until
-    ``finished``. All blocking happens on the gateway worker thread; poll
-    only inspects completed futures and therefore never blocks.
+    Two modes:
+
+    - *owned* (default): a private one-shot gateway is created, driven
+      through the full cycle and stopped — same as the original Phase-3
+      probe.
+    - *borrowed* (``shared_gateway=…``): the app shell's persistent
+      gateway is inspected instead. The MetaTrader5 module is a
+      process-global singleton — a second ``initialize()``/``shutdown()``
+      from a private probe gateway silently kills the shared session
+      underneath it (the UI keeps saying "connected" while every call
+      fails). So a borrowed probe NEVER re-connects a live session
+      (read-only steps) and NEVER stops the shared gateway; when the
+      session is idle it runs the full cycle and the trailing disconnect
+      restores the pre-probe state.
     """
 
     def __init__(
@@ -324,11 +335,15 @@ class ConnectionProbe:
         *,
         symbols: tuple[str, ...] = DEFAULT_WATCHLIST,
         timeout_s: float = 15.0,
+        shared_gateway: MT5Gateway | None = None,
     ) -> None:
         self._request = request
         self._mt5_factory = mt5_factory
         self._symbols = symbols
         self._timeout_s = timeout_s
+        self._shared = shared_gateway
+        self._own_gateway = shared_gateway is None
+        self._steps: tuple[str, ...] = PROBE_STEPS
         self._gateway: MT5Gateway | None = None
         self._index = 0
         self._finished = False
@@ -339,16 +354,29 @@ class ConnectionProbe:
 
     # -- public -----------------------------------------------------------------
     def start(self) -> None:
-        """Create the gateway and submit the first step (connect)."""
-        self._gateway = MT5Gateway(mt5_factory=self._mt5_factory, request_timeout_s=self._timeout_s)
-        self._gateway.start()
+        """Bind the gateway and submit the first step."""
+        if self._own_gateway:
+            self._gateway = MT5Gateway(
+                mt5_factory=self._mt5_factory,
+                request_timeout_s=self._timeout_s,
+                name="probe",
+            )
+            self._gateway.start()
+        else:
+            assert self._shared is not None  # own_gateway False implies shared set
+            self._gateway = self._shared
+            if self._shared.state is ConnectionState.CONNECTED:
+                # Live persistent session — inspect read-only, touch nothing.
+                self._steps = tuple(
+                    step for step in PROBE_STEPS if step not in ("connect", "disconnect")
+                )
         self._advance()
 
     def poll(self) -> ProbeState:
         """Advance the step machine; safe to call from the UI thread."""
         if self._finished or self._gateway is None:
             return self._state()
-        step = PROBE_STEPS[self._index]
+        step = self._steps[self._index]
         if self._future is not None and not self._future.done():
             return self._state(step)
         if self._future is not None:
@@ -356,17 +384,17 @@ class ConnectionProbe:
                 self._collect(step, self._future.result(timeout=0))
             except Exception as exc:
                 return self._finish(ok=False, detail=_friendly(exc))
-        if self._index >= len(PROBE_STEPS) - 1:
+        if self._index >= len(self._steps) - 1:
             return self._finish(ok=self._ok, detail=self._summary())
         self._index += 1
         self._advance()
-        return self._state(PROBE_STEPS[self._index])
+        return self._state(self._steps[self._index])
 
     def cancel(self) -> None:
         """Abort mid-flight (user closed the dialog)."""
-        if self._gateway is not None:
+        if self._gateway is not None and self._own_gateway:
             self._gateway.stop()
-            self._gateway = None
+        self._gateway = None
         self._finished = True
         self._ok = False
         self._detail_parts = {"cancelled": "yes"}
@@ -375,7 +403,7 @@ class ConnectionProbe:
     def _advance(self) -> None:
         if self._gateway is None:
             return
-        step = PROBE_STEPS[self._index]
+        step = self._steps[self._index]
         if step == "connect":
             self._future = self._gateway.connect(self._request)
         elif step == "account":
@@ -415,20 +443,20 @@ class ConnectionProbe:
 
     def _summary(self) -> str:
         return "; ".join(
-            self._detail_parts.get(step, "") for step in PROBE_STEPS if self._detail_parts.get(step)
+            self._detail_parts.get(step, "") for step in self._steps if self._detail_parts.get(step)
         )
 
     def _finish(self, *, ok: bool, detail: str) -> ProbeState:
-        if self._gateway is not None:
+        if self._gateway is not None and self._own_gateway:
             self._gateway.stop()
-            self._gateway = None
+        self._gateway = None
         self._finished = True
         self._ok = ok
         self._detail_parts = {"result": detail}
         return ProbeState(
-            step=PROBE_STEPS[-1],
-            index=len(PROBE_STEPS) - 1,
-            total=len(PROBE_STEPS),
+            step=self._steps[-1],
+            index=len(self._steps) - 1,
+            total=len(self._steps),
             finished=True,
             ok=ok,
             detail=detail,
@@ -437,18 +465,18 @@ class ConnectionProbe:
     def _state(self, step: str | None = None) -> ProbeState:
         if self._finished:
             return ProbeState(
-                step=PROBE_STEPS[-1],
-                index=len(PROBE_STEPS) - 1,
-                total=len(PROBE_STEPS),
+                step=self._steps[-1],
+                index=len(self._steps) - 1,
+                total=len(self._steps),
                 finished=True,
                 ok=self._ok,
                 detail=self._summary(),
             )
-        step = step or PROBE_STEPS[max(self._index, 0)]
+        step = step or self._steps[max(self._index, 0)]
         return ProbeState(
             step=step,
             index=max(self._index, 0),
-            total=len(PROBE_STEPS),
+            total=len(self._steps),
             finished=False,
             ok=True,
             detail=self._detail_parts.get(step, ""),
