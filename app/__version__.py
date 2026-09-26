@@ -4,4 +4,4 @@ This file is bumped ONLY by release-please (configured via
 ``release-please-config.json``). Do not edit it manually.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
