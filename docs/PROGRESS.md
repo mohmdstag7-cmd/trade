@@ -9,8 +9,8 @@
 |---|-------|--------|-------------|
 | 1 | Foundation | **merged** | PR #1 |
 | 2 | Observability | **merged** | PR #9 |
-| 3 | MT5 connection (real) | **in review** | `phase/03-mt5-gateway` |
-| 4 | Storage | not started | — |
+| 3 | MT5 connection (real) | **merged** | PR #14 |
+| 4 | Storage | **in review** | `phase/04-storage` |
 | 5 | Market data & analysis | not started | — |
 | 6 | Strategies & signals | not started | — |
 | 7 | Risk | not started | — |
@@ -229,4 +229,88 @@ python -m app        # Settings page → MT5 connection → Test connection
    health events table (SPEC E).
 
 ---
+---
+
+## Phase 4 — Storage (in review)
+
+### Built
+
+- `app/storage/db.py` — **Database**: SQLite in WAL mode, `synchronous=NORMAL`,
+  foreign keys ON, busy-timeout 5 s; per-thread connections (threading.local);
+  nested-transaction support (repositories compose into one atomic write);
+  size/WAL/integrity introspection.
+- `app/storage/migrations.py` — **MigrationRunner**: numbered, immutable,
+  idempotent migrations with a `schema_migrations` ledger; each step runs
+  transactionally (statements split via `sqlite3.complete_statement` —
+  `executescript` would implicitly COMMIT and break atomicity). **M001**
+  creates the full SPEC E2 schema: 21 business tables + outbox, UUID TEXT
+  PKs, UTC ISO-8601 timestamps, time/symbol/strategy indexes.
+- `app/storage/repositories.py` — typed repositories (signals with state
+  transitions, trades with close/import, decision traces, audit log, health,
+  mt5 requests, account snapshots, risk events, sessions, app logs + generic
+  access). Every mirrored insert enqueues its outbox row in the SAME
+  transaction; `import_row` uses deterministic UUID5 ids.
+- `app/storage/outbox.py` — **OutboxWorker**: batch claim → upsert → ack;
+  exponential backoff (5 s → 1 h) per row, dead-letter after 10 attempts,
+  global 15 min cooldown on auth/server errors (paused free tier), in-flight
+  requeue on start (crash recovery), `SyncStatus` snapshot for the UI.
+- `app/storage/mirror.py` — **SupabaseMirror**: lazy client, upsert
+  `on_conflict=id` (duplicate-free), error taxonomy
+  (auth/network/server/client) with friendly bilingual messages; service key
+  never logged. `NullMirror` for local-only mode.
+- `app/storage/vault.py` — **KeyringVault**: named secrets in the OS vault
+  (Windows Credential Manager); same fail-backend detection as MT5 creds.
+- `app/storage/audit.py` — masked before→after audit trail with typed actions
+  (app.started, settings.changed, settings.cloud.changed, risk.kill_switch…).
+- `app/storage/backup.py` — daily online snapshot via the SQLite backup API,
+  keep 7, skip-if-today-exists.
+- `app/storage/cleanup.py` — retention: app_logs 30 d, mt5_requests 14 d,
+  account_snapshots 30 d, performance_metrics 14 d, health_checks 30 d;
+  trades/signals/audit_log/journal/decision_traces are protected forever;
+  slow background scheduler.
+- `app/storage/log_sink.py` — buffered WARNING+ loguru sink feeding
+  `app_logs` (mirrored automatically); DEBUG/TRACE stay local.
+- `app/storage/history_import.py` — closing deals (OUT/INOUT/OUT_BY) → trade
+  rows with deterministic ids; overlapping re-imports never duplicate
+  (G3-4 acceptance). New `gateway.history_deals` command + `DealSnapshot`
+  + `FakeMetaTrader5.history_deals_get` with date filtering.
+- `app/storage/service.py` — **StorageService** façade: migrate → backup →
+  session row → workers; cloud config from QSettings URL + vault key;
+  `apply_cloud_config()`; `stats()`/`sync_status()` snapshots.
+- CLI: `--db-check [--json] [--data-dir]` (migrate + stats + integrity);
+  `--self-check` now also proves the storage layer inside packaged builds.
+- UI: Settings **Storage & Sync** card (DB path/size/WAL, schema version,
+  integrity, backups kept, sync queue depth, last sync, cloud ON/OFF) +
+  Supabase URL/key form with Save/Remove/Test (`CloudProbe` on a worker
+  thread); audit events for cloud + password changes.
+- `supabase/schema.sql` — the cloud side of the mirror: all tables
+  (timestamptz, jsonb, indexes), RLS enabled everywhere (anon blocked —
+  service_role key required), views `v_trade_full`,
+  `v_daily_performance`, `v_performance_by_bucket`,
+  `v_strategy_config_compare`; bilingual `supabase/README.md` setup guide.
+
+### How to verify (your PC, Windows)
+
+```bat
+pip install -e ".[dev]"
+python -m app --db-check              :: migrate + stats + integrity
+python -m app --db-check --json       :: machine-readable
+python -m app                         :: Settings page shows Storage & Sync
+```
+
+Cloud (optional): create a free project at supabase.com → run
+`supabase/schema.sql` in its SQL Editor → paste URL + service key in the
+Settings card → Save → Test. Offline writes sync later without duplicates.
+
+### Acceptance (SPEC G3-4)
+
+- [x] SQLite + idempotent migrations (ledger, transactional DDL).
+- [x] Outbox pattern: row + queue entry commit atomically; worker drains
+      with backoff; offline writes sync later **without duplicates**
+      (upsert by UUID; deterministic ids for history import).
+- [x] Supabase schema/views/RLS + setup guide; sync status in the UI;
+      free-tier pause handled via global cooldown.
+- [x] Audit log wired into settings changes and app lifecycle.
+- [x] History import (deal history → trades, idempotent).
+- [x] Daily backups (keep 7) + retention cleanup protecting business rows.
 

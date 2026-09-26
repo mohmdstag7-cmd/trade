@@ -33,6 +33,16 @@ pytest
 python -m app
 ```
 
+## Cloud mirror (optional)
+
+Everything is stored locally first. To mirror to Supabase:
+
+1. Create a free project at [supabase.com](https://supabase.com).
+2. Run [`supabase/schema.sql`](supabase/schema.sql) in its SQL Editor.
+3. In the app: **Settings → Storage & Sync** → paste the Project URL and the
+   service_role key → **Save** → **Test**. The bilingual guide with details:
+   [supabase/README.md](supabase/README.md).
+
 ## Build the Windows executable
 
 ```bat
