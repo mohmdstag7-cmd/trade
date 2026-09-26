@@ -97,15 +97,20 @@ class TestStorageService:
             service.close()
 
 
+class _Args:
+    """argparse.Namespace stand-in (explicit ctor: class bodies cannot
+    resolve the enclosing test's `data_dir` fixture parameter)."""
+
+    def __init__(self, data_dir: str, json: bool = False) -> None:
+        self.data_dir = data_dir
+        self.json = json
+
+
 class TestDbCheckCli:
     def test_db_check_fresh_dir_succeeds(
         self, data_dir: pathlib.Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        class Args:
-            data_dir = str(data_dir)
-            json = False
-
-        assert run_db_check(Args()) == 0
+        assert run_db_check(_Args(str(data_dir))) == 0
         out = capsys.readouterr().out
         assert "Integrity: OK" in out
         assert "Schema version: 1" in out
@@ -116,33 +121,21 @@ class TestDbCheckCli:
     ) -> None:
         import json
 
-        class Args:
-            data_dir = str(data_dir)
-            json = True
-
-        assert run_db_check(Args()) == 0
+        assert run_db_check(_Args(str(data_dir), json=True)) == 0
         payload = json.loads(capsys.readouterr().out)
         assert payload["integrity_ok"] is True
         assert payload["version"] == 1
         assert payload["cloud_enabled"] is False
 
     def test_db_check_twice_is_idempotent(self, data_dir: pathlib.Path) -> None:
-        class Args:
-            data_dir = str(data_dir)
-            json = True
-
-        assert run_db_check(Args()) == 0
-        assert run_db_check(Args()) == 0
+        assert run_db_check(_Args(str(data_dir))) == 0
+        assert run_db_check(_Args(str(data_dir))) == 0
 
     def test_db_check_failure_exit_one(self, tmp_path: pathlib.Path) -> None:
         # A directory where the DB file should be → open fails.
-        class Args:
-            data_dir = str(tmp_path / "blocker")
-            json = False
-
         (tmp_path / "blocker" / "data").mkdir(parents=True)
         (tmp_path / "blocker" / "data" / "workstation.db").mkdir()
-        assert run_db_check(Args()) == 1
+        assert run_db_check(_Args(str(tmp_path / "blocker"))) == 1
 
 
 class TestSelfCheckStorageGate:

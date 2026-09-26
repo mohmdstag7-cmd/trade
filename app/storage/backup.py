@@ -37,8 +37,14 @@ class BackupService:
         self._dir.mkdir(parents=True, exist_ok=True)
         source = self._db.connection()
         try:
-            with sqlite3.connect(str(target)) as dest:
+            # NOTE: sqlite3 connections must be closed explicitly — the
+            # context manager only manages transactions. On Windows an open
+            # handle would block file rotation below.
+            dest = sqlite3.connect(str(target))
+            try:
                 source.backup(dest)
+            finally:
+                dest.close()
         except (sqlite3.Error, OSError) as exc:
             log.warning("storage: backup failed: {}", exc)
             return None
