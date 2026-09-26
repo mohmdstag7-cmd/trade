@@ -10,7 +10,7 @@
 | 1 | Foundation | **merged** | PR #1 |
 | 2 | Observability | **merged** | PR #9 |
 | 3 | MT5 connection (real) | **merged** | PR #14 |
-| 4 | Storage | **in review** | `phase/04-storage` |
+| 4 | Storage | **merged** | PR #17 |
 | 5 | Market data & analysis | not started | — |
 | 6 | Strategies & signals | not started | — |
 | 7 | Risk | not started | — |
@@ -76,9 +76,9 @@ python -m app
 ### Next steps
 
 1. ~~Merge Phase 1 PR after CI is green~~ — merged (PR #1).
-2. ~~Phase 2 — Observability~~ — built, in review (see below).
+2. ~~Phase 2 — Observability~~ — merged (PR #9).
 
-## Phase 2 — Observability (current)
+## Phase 2 — Observability (merged)
 
 ### Built
 
@@ -133,8 +133,8 @@ python -m app        # Logs page now shows live entries; %LOCALAPPDATA%\MT5Tradi
 - [x] Secrets are masked in logs — tested (`test_masking.py`,
       `test_logging.py`, end-to-end smoke run).
 - [x] Lint/tests pass locally (ruff, mypy, pytest 118/118).
-- [ ] CI green on the PR (checked when the PR runs).
-- [ ] Build artifact runs `--self-check` (build workflow).
+- [x] CI green on the PR — merged (PR #9).
+- [x] Build artifact runs `--self-check` (build workflow) — v0.2.1+ artifacts verified.
 
 ### Known issues / limitations
 
@@ -147,7 +147,7 @@ python -m app        # Logs page now shows live entries; %LOCALAPPDATA%\MT5Tradi
 
 ---
 
-## Phase 3 — MT5 Gateway (in review)
+## Phase 3 — MT5 Gateway (merged)
 
 ### Built
 
@@ -212,7 +212,7 @@ python -m app        # Settings page → MT5 connection → Test connection
 - [x] Password only in the OS vault; masked logins in logs/reports — tested.
 - [x] Demo-only trade test refuses REAL accounts before any order — tested.
 - [x] Lint/tests pass locally (ruff, ruff format, mypy, pytest 227/227, 92 %).
-- [ ] CI green on the PR (checked when the PR runs).
+- [x] CI green on the PR — merged (PR #14).
 
 ### Known issues / limitations
 
@@ -224,14 +224,14 @@ python -m app        # Settings page → MT5 connection → Test connection
 
 ### Next steps
 
-1. Merge Phase 3 PR after CI is green.
-2. Phase 4 — Storage: SQLite WAL + migrations, Supabase outbox mirror,
-   health events table (SPEC E).
+1. ~~Merge Phase 3 PR after CI is green.~~ — merged (PR #14).
+2. ~~Phase 4 — Storage~~ — merged (PR #17), released as v0.4.0.
+   Next: Phase 5 — Market data & analysis.
 
 ---
 ---
 
-## Phase 4 — Storage (in review)
+## Phase 4 — Storage (merged)
 
 ### Built
 
