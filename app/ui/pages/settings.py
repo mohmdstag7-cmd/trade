@@ -424,7 +424,7 @@ class SettingsPage(QWidget):
             return
         if self._connect_worker is not None:  # already busy
             return
-        if self._shared_gateway.state().value == "connected":
+        if self._shared_gateway.state.value == "connected":
             self._start_connect_worker(mode="disconnect")
             return
         login = self._persist_account()
@@ -783,7 +783,7 @@ class SettingsPage(QWidget):
         self._terminal_edit.setPlaceholderText(tr("settings.account.terminal_path.placeholder"))
         self._auto_connect_check.setText(tr("connect.auto"))
         connected = (
-            self._shared_gateway is not None and self._shared_gateway.state().value == "connected"
+            self._shared_gateway is not None and self._shared_gateway.state.value == "connected"
         )
         self._connect_button.setText(
             tr("connect.disconnect") if connected else tr("connect.connect")
