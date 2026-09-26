@@ -22,6 +22,9 @@ a = Analysis(
         "PySide6.QtCore",
         "PySide6.QtGui",
         "PySide6.QtWidgets",
+        # icon provider (Phase 6); hooks-contrib collects its font assets
+        "qtawesome",
+        "qtpy",
     ],
     hookspath=[],
     runtime_hooks=[],

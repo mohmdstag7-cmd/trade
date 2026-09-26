@@ -18,6 +18,19 @@ from app.ui.i18n.translator import Translator
 from app.ui.theme.manager import ThemeManager
 
 
+@pytest.fixture(scope="session", autouse=True)
+def qapp():
+    """Guarantee a QApplication for the whole session.
+
+    Test isolation: several UI tests construct widgets without ``qtbot``;
+    they previously depended on another test file creating the app first.
+    """
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    yield app
+
+
 @pytest.fixture
 def settings_path(tmp_path: pathlib.Path) -> str:
     """Path to a per-test INI settings file."""

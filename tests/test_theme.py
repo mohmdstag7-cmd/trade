@@ -50,7 +50,7 @@ def test_build_qss_embeds_theme_colors() -> None:
     assert DARK.bg in qss
     assert DARK.accent in qss
     assert "QMainWindow" in qss
-    assert "#SidebarButton" in qss
+    assert "#NavButton" in qss
     assert "#Card" in qss
     assert "#ConnectionDot" in qss
 

@@ -10,9 +10,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QFrame, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from app.ui.i18n.translator import Translator
+from app.ui.icons import PAGE_ICONS, icon
+from app.ui.theme.manager import ThemeManager
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,10 +70,13 @@ class EmptyStatePage(QWidget):
         meta: PageMeta,
         translator: Translator,
         parent: QWidget | None = None,
+        *,
+        theme_manager: ThemeManager | None = None,
     ) -> None:
         super().__init__(parent)
         self._meta = meta
         self._translator = translator
+        self._theme_manager = theme_manager
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(32, 32, 32, 32)
@@ -79,30 +84,55 @@ class EmptyStatePage(QWidget):
 
         card = QFrame()
         card.setObjectName("Card")
-        card.setFixedWidth(440)
+        card.setFixedWidth(460)
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(28, 28, 28, 28)
         card_layout.setSpacing(12)
 
+        head = QHBoxLayout()
+        head.setSpacing(14)
+
+        self._icon_holder = QLabel()
+        self._icon_holder.setObjectName("EmptyIcon")
+        self._icon_holder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        head.addWidget(self._icon_holder, 0, Qt.AlignmentFlag.AlignTop)
+
+        head_text = QVBoxLayout()
+        head_text.setSpacing(4)
         self._title = QLabel()
         self._title.setObjectName("PageTitle")
         self._title.setWordWrap(True)
+        head_text.addWidget(self._title)
+        self._phase_chip = QLabel()
+        self._phase_chip.setObjectName("PhaseChip")
+        head_text.addWidget(self._phase_chip, 0, Qt.AlignmentFlag.AlignLeft)
+        head.addLayout(head_text, 1)
+
+        card_layout.addLayout(head)
 
         self._desc = QLabel()
         self._desc.setObjectName("MutedLabel")
         self._desc.setWordWrap(True)
-
-        self._phase_chip = QLabel()
-        self._phase_chip.setObjectName("PhaseChip")
-
-        card_layout.addWidget(self._title)
         card_layout.addWidget(self._desc)
-        card_layout.addWidget(self._phase_chip, 0, Qt.AlignmentFlag.AlignLeft)
         card_layout.addStretch(1)
 
         outer.addWidget(card, 0, Qt.AlignmentFlag.AlignCenter)
+
+        if theme_manager is not None:
+            theme_manager.theme_changed.connect(lambda _n: self._apply_icon())
         translator.language_changed.connect(lambda _lang: self.retranslate())
         self.retranslate()
+        self._apply_icon()
+
+    def _apply_icon(self) -> None:
+        if self._theme_manager is None:
+            return
+        name = PAGE_ICONS.get(self._meta.key)
+        if name is None:
+            return
+        ic = icon(name, self._theme_manager.tokens.accent, size=26)
+        if ic is not None:
+            self._icon_holder.setPixmap(ic.pixmap(26, 26))
 
     def retranslate(self) -> None:
         """Refresh all texts for the current language."""

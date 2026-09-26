@@ -28,5 +28,10 @@ class EventBus(QObject):
     #: Emitted when the MT5 connection verdict changed (ok, detail).
     mt5_connection_changed = Signal(bool, str)
 
+    #: Emitted when the shared gateway's live state changed (state, detail).
+    #: ``state`` is a ConnectionState value: connecting/connected/
+    #: reconnecting/disconnected.
+    gateway_state_changed = Signal(str, str)
+
     #: Emitted when a symbol's market analysis snapshot changed (symbol).
     market_analysis_changed = Signal(str)
