@@ -66,7 +66,7 @@ class MainWindow(QMainWindow):
         self._pages: dict[str, QWidget] = {}
         for meta in PAGES:
             if meta.key == "settings":
-                page: QWidget = SettingsPage(translator, theme_manager, self)
+                page: QWidget = SettingsPage(translator, theme_manager, self, bus=bus)
             elif meta.key == "logs" and logs_page is not None:
                 page = logs_page
             else:
@@ -94,6 +94,7 @@ class MainWindow(QMainWindow):
         # -- wiring ---------------------------------------------------------------
         self._sidebar.navigate.connect(self.switch_page)
         bus.navigate_requested.connect(self.switch_page)
+        bus.mt5_connection_changed.connect(self._on_mt5_connection_changed)
         translator.language_changed.connect(self._on_language_changed)
 
         self._palette_shortcut = QShortcut(QKeySequence(self.PALETTE_SHORTCUT), self)
@@ -159,6 +160,10 @@ class MainWindow(QMainWindow):
     def _toggle_language(self) -> None:
         other = "fa" if self._translator.language == "en" else "en"
         self._translator.set_language(other)
+
+    def _on_mt5_connection_changed(self, ok: bool, detail: str) -> None:
+        """Reflect the Phase-3 connection probe result in the status bar."""
+        self._status_bar.set_connection_state(ok, detail)
 
     def _on_language_changed(self, _language: str) -> None:
         self.setWindowTitle(self._translator.translate("app.title"))

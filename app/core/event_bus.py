@@ -24,3 +24,6 @@ class EventBus(QObject):
 
     #: Emitted when someone requests navigation to a page key.
     navigate_requested = Signal(str)
+
+    #: Emitted when the MT5 connection verdict changed (ok, detail).
+    mt5_connection_changed = Signal(bool, str)

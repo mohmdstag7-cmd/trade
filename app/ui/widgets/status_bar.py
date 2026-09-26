@@ -85,12 +85,17 @@ class StatusBar(QStatusBar):
         self.retranslate()
 
     # -- public API (used by later phases) --------------------------------------
-    def set_connection_state(self, connected: bool) -> None:
-        """Update the connection dot and label."""
+    def set_connection_state(self, connected: bool, detail: str = "") -> None:
+        """Update the connection dot, label and tooltip (Phase 3 detail)."""
         self._dot.setProperty("connected", connected)
         repolish(self._dot)
         key = "status.connected" if connected else "status.disconnected"
         self._connection_label.setText(self._translator.translate(key))
+        tooltip = self._translator.translate("status.connection.tooltip")
+        if detail:
+            tooltip = f"{detail} — {tooltip}"
+        self._connection_label.setToolTip(tooltip)
+        self._dot.setToolTip(tooltip)
 
     # -- internals ---------------------------------------------------------------
     def _update_clock(self) -> None:

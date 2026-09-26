@@ -3,7 +3,7 @@
 > Updated at the end of every phase (SPEC A5). Decisions are recorded ADR-style:
 > **decision + reason**. For the full product specification see `docs/SPEC.md`.
 
-## Current state: Phase 2 (Observability)
+## Current state: Phase 3 (MT5 Gateway)
 
 ```
 ┌────────────────────────────────────────────────────────────┐
@@ -18,7 +18,11 @@
 │  logger (16 categories → JSONL) ─ context (session/trace)   │
 │  masking (secrets) ─ crash handler ─ watchdog ─ ring buffer │
 ├────────────────────────────────────────────────────────────┤
-│  MT5 gateway (Phase 3) · Storage (Phase 4) · Engine (6-8)   │
+│                  MT5 layer (Phase 3)                        │
+│  gateway (1 thread + queue) ─ errors ─ credentials ─        │
+│  symbols (suffix resolve) ─ diagnostics ─ demo trade test   │
+├────────────────────────────────────────────────────────────┤
+│  Storage (Phase 4) · Engine (6-8)                           │
 │  Analysis (5) · ML (10) · Backtest (9) · Analytics (11)     │
 └────────────────────────────────────────────────────────────┘
 ```
@@ -122,11 +126,37 @@ and the UI instant, lock-cheap access without touching files that
 background threads are writing; the patcher makes secrecy-by-default
 impossible to bypass by forgetting a filter (SPEC E3, C-security).
 
+### ADR-0010 — Single-threaded gateway behind futures (Phase 3)
+**Decision:** One dedicated worker thread owns every MetaTrader5 call.
+Public gateway methods enqueue `(operation, callable, future)` tuples and
+return `concurrent.futures.Future` immediately; results are converted to
+frozen dataclass snapshots on the worker before delivery. Disconnects map
+onto `ConnectionLostError` which flips the machine into `RECONNECTING`
+with exponential backoff; commands arriving during backoff fail fast.
+**Reason:** The MT5 package is not thread-safe and blocks (SPEC C3, I-8);
+futures let the CLI block deliberately while the UI polls from a QTimer,
+and typed snapshots keep the broker dependency quarantined inside
+`app/mt5` so domain/UI/storage layers stay portable and testable against
+the stateful fake (SPEC C2).
+
+### ADR-0011 — Credentials live only in the OS vault (Phase 3)
+**Decision:** The account password is stored exclusively in Windows
+Credential Manager through `keyring` (service `MT5TradingWorkstation`,
+username = login). QSettings keeps login/server/terminal-path only;
+in-memory `ConnectRequest` carries the password for one session. The CLI
+accepts `--password-stdin` or the vault — never argv/env; logs show
+`***`-masked login tails only.
+**Reason:** Secrets must never reach code, config files, logs, exports or
+crash reports (SPEC C11, I-6); masking at the source plus storage outside
+the filesystem makes the leak paths structurally impossible rather than
+policy-enforced.
+
 ## Planned layer additions (per phase)
 
 - Phase 2: `observability/` categories, trace ids, masking, crash handler,
   watchdog, Logs page.
-- Phase 3: `mt5/` gateway + connection + symbols; FakeMT5 in `tests/fakes/`.
+- Phase 3: `mt5/` gateway + errors + credentials + symbols + diagnostics;
+  FakeMT5 in `tests/fakes/` (done).
   Watchdog heartbeats are wired to the gateway thread; startup log gains
   MT5 build, broker and account fields.
 - Phase 4: `storage/` sqlite + migrations + outbox + supabase.
