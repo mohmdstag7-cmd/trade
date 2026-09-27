@@ -108,7 +108,11 @@ class PriceChart(pg.GraphicsLayoutWidget):
     def __init__(self, parent: Any = None) -> None:
         super().__init__(parent)
         self._candles = CandlestickItem()
-        self._price_plot: pg.PlotItem = self.addPlot(row=0, col=0)
+        # enableMenu=False: the app never uses the ViewBox context menu, and
+        # lazily-built ViewBoxMenu objects crashed with a fatal Qt error on
+        # some Windows runs (flaky CI in test_chart_receives_bars) when the
+        # menu outlived its widget. No menu → no crash class.
+        self._price_plot: pg.PlotItem = self.addPlot(row=0, col=0, enableMenu=False)
         self._price_plot.showGrid(x=True, y=True, alpha=0.15)
         self._price_plot.setMouseEnabled(x=True, y=False)
         self._price_plot.hideButtons()
@@ -117,7 +121,7 @@ class PriceChart(pg.GraphicsLayoutWidget):
         self._price_plot.showAxis("right")
         self._price_plot.getAxis("right").setWidth(8)
 
-        self._volume_plot: pg.PlotItem = self.addPlot(row=1, col=0)
+        self._volume_plot: pg.PlotItem = self.addPlot(row=1, col=0, enableMenu=False)
         self._volume_plot.setXLink(self._price_plot)
         self._volume_plot.setMaximumHeight(80)
         self._volume_plot.hideAxis("left")

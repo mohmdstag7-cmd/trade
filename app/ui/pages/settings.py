@@ -42,6 +42,7 @@ from app.core.settings import (
 from app.mt5.credentials import CredentialStore, CredentialStoreError
 from app.mt5.diagnostics import ConnectionProbe
 from app.mt5.models import ConnectRequest
+from app.observability.logger import get_logger
 from app.storage.cloud_probe import CloudProbe
 from app.storage.mirror import SUPABASE_KEY_ENTRY
 from app.storage.vault import KeyringVault, VaultError
@@ -60,6 +61,8 @@ from app.updater.worker import ElevateWorker, UpdateWorker
 
 _PROBE_POLL_MS = 150
 _STORAGE_POLL_MS = 2000
+
+log = get_logger("app")
 
 #: characters that never appear in legitimate MT5 server names ("FIBOGroup-MT5
 #: Server", "MetaQuotes-Demo"); their presence usually means a secret (the
@@ -516,6 +519,11 @@ class SettingsPage(QWidget):
         self._update_restart_button.setEnabled(True)
         self._update_restart_button.setVisible(True)
         if "apply FAILED" in read_apply_log_tail(lines=50):
+            # Land the installer's own log in the app log — the user sends
+            # us app logs for diagnostics, so a failed apply becomes
+            # explainable without asking anyone to hunt for files.
+            tail = read_apply_log_tail(lines=15)
+            log.warning("updates: last staged install failed (v={})\n{}", version, tail)
             self._update_status_label.setText(self._tr("updates.last_failed", version=version))
         else:
             self._update_status_label.setText(self._tr("updates.resume_ready", version=version))
