@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versions are managed automatically by [release-please](https://github.com/googleapis/release-please)
 from Conventional Commits.
 
+## [0.7.2](https://github.com/mohmdstag7-cmd/trade/compare/v0.7.1...v0.7.2) (2026-09-27)
+
+
+### Bug Fixes
+
+* chart menu crash, gateway double-worker, updater diagnostics ([#38](https://github.com/mohmdstag7-cmd/trade/issues/38)) ([0bdc2cf](https://github.com/mohmdstag7-cmd/trade/commit/0bdc2cf3f6887ef5dbf67ff85ee80b128bb3e4cb))
+
 ## [0.7.1](https://github.com/mohmdstag7-cmd/trade/compare/v0.7.0...v0.7.1) (2026-09-27)
 
 
