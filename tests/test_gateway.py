@@ -128,6 +128,61 @@ class TestLifecycle:
         with pytest.raises(mt5_errors.MT5Error, match="stopped"):
             future.result(timeout=1.0)
 
+    def test_stop_timeout_keeps_worker_and_blocks_second_start(self) -> None:
+        """A stop() that times out (slow call draining) must NOT lose the
+        thread reference — otherwise start() spawns a second worker that
+        races the still-alive first one (duplicate started / ghost
+        session-closed lines, concurrent MT5 module access)."""
+        entered = threading.Event()
+        release = threading.Event()
+
+        class BlockingMT5:
+            initialized = False
+
+            def initialize(self, **_kwargs: object) -> bool:
+                entered.set()
+                release.wait(timeout=5.0)
+                self.initialized = True
+                return True
+
+            def login(self, *_args: object, **_kwargs: object) -> bool:
+                return True
+
+            def shutdown(self) -> None:
+                self.initialized = False
+
+            def last_error(self) -> tuple[int, str]:
+                return (0, "")
+
+            def account_info(self) -> None:
+                return None
+
+        blocking = BlockingMT5()
+        gateway = MT5Gateway(mt5_factory=lambda: blocking, request_timeout_s=5.0)
+        gateway.start()
+        try:
+            draining = gateway._thread
+            assert draining is not None
+            gateway.connect(make_request())
+            assert entered.wait(timeout=5.0), "worker never reached initialize()"
+
+            gateway.stop(timeout_s=0.2)  # join times out — call still draining
+            assert gateway._thread is draining, "stop() dropped the draining thread"
+            assert gateway._thread.is_alive()
+
+            gateway.start()  # must be a no-op, never a second worker
+            assert gateway._thread is draining
+            assert sum(1 for t in threading.enumerate() if t is draining) == 1
+        finally:
+            release.set()
+        assert wait_until(lambda: not draining.is_alive()), "worker never exited"
+
+        gateway.start()  # recovery once the drained thread is gone
+        fresh = gateway._thread
+        assert fresh is not None and fresh is not draining and fresh.is_alive()
+        gateway.stop()
+        assert gateway._thread is None
+
     def test_state_history_recorded(self, gateway: MT5Gateway) -> None:
         gateway.wait_for_result(gateway.connect(make_request()), "connect")
         gateway.wait_for_result(gateway.disconnect(), "disconnect")

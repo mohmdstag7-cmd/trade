@@ -129,23 +129,30 @@ class MT5Gateway:
         log.info("gateway[{}]: started", self._name)
 
     def stop(self, timeout_s: float = 5.0) -> None:
-        """Stop the worker, release the terminal session, fail pending commands."""
+        """Stop the worker, release the terminal session, fail pending commands.
+
+        When a slow terminal call outlives ``timeout_s``, the thread
+        reference is deliberately KEPT: a following ``start()`` must not
+        spawn a second worker while the first one is still draining —
+        two workers race the non-thread-safe MT5 module (duplicate
+        ``started`` lines, ghost ``session closed`` after ``stopped``,
+        interleaved initialize/shutdown). Re-run ``stop()`` to keep
+        waiting, or ``start()`` once the drained thread has exited.
+        """
         if self._thread is None:
             return
         self._stop_event.set()
         self._queue.put(None)  # wake the worker so it sees the stop flag
         self._thread.join(timeout=timeout_s)
         if self._thread.is_alive():
-            # A long initialize() can outlive the join. The worker will exit
-            # on its own eventually; until then the stop flag keeps new
-            # commands failing fast, but this instance must not be reused
-            # for start() until the thread actually dies.
             log.warning(
                 "gateway[{}]: worker did not exit within {:.0f}s — a slow "
-                "terminal call is still draining",
+                "terminal call is still draining; start() is disabled until "
+                "the thread exits",
                 self._name,
                 timeout_s,
             )
+            return
         self._thread = None
         log.info("gateway[{}]: stopped", self._name)
 
