@@ -10,12 +10,15 @@ from __future__ import annotations
 import json
 import pathlib
 import sys
+import urllib.request
 import zipfile
 
 import pytest
 
 from app.updater.github import (
+    NetworkUnreachable,
     delta_zip_url,
+    detect_proxy,
     full_zip_url,
     latest_manifest_url,
     releases_page_url,
@@ -32,7 +35,6 @@ from app.updater.service import (
     UpdatePlan,
     UpdaterError,
     UpdateService,
-    apply_script_payload,
 )
 from app.updater.version import is_newer, parse_version
 
@@ -176,86 +178,18 @@ def test_staging_root_is_sibling(tmp_path: pathlib.Path) -> None:
         staging_root(app_dir, "nope")
 
 
-# -- apply script ----------------------------------------------------------------------
+# -- installer spawn command ---------------------------------------------------
 
 
-def test_apply_script_waits_copies_and_restarts() -> None:
-    payload = apply_script_payload(
-        pathlib.Path(r"C:\Apps\MT5TradingWorkstation"),
-        pathlib.Path(r"C:\Apps\MT5TradingWorkstation.update-0.6.0"),
-        pid=4242,
-        removed=("old.dll", "sub/ancient.pdb"),
+def test_apply_update_command_spawns_own_executable(tmp_path: pathlib.Path) -> None:
+    service = _service(tmp_path, FakeFetcher())
+    command = service.apply_update_command("0.6.0")
+    assert command[1] == "--apply-update"
+    assert "--update-staging" in command
+    assert command[command.index("--update-staging") + 1] == str(
+        staging_root(service.app_dir, "0.6.0")
     )
-    assert 'set "TARGET_PID=4242"' in payload
-    assert 'tasklist /FI "PID eq %TARGET_PID%"' in payload
-    assert 'robocopy "%STAGE%" "%APP_DIR%" /E' in payload
-    assert 'start "" "%APP_DIR%\\MT5TradingWorkstation.exe"' in payload
-    assert "old.dll" in payload and "ancient.pdb" in payload
-
-
-class TestApplyScriptRobustness:
-    """v0.6.2/0.6.3 downloaded updates but never installed them.
-
-    The old script waited with ``timeout /t 1``, which cannot run in the
-    detached (console-less) process the app spawns — the wait loop fell
-    through instantly, robocopy raced the still-running app, hit locked
-    files and gave up. These assertions pin the corrected behaviour.
-    """
-
-    def _payload(self, removed: tuple[str, ...] = ()) -> str:
-        return apply_script_payload(
-            pathlib.Path(r"C:\Apps\MT5TradingWorkstation"),
-            pathlib.Path(r"C:\Apps\MT5TradingWorkstation.update-0.6.0"),
-            pid=4242,
-            removed=removed,
-        )
-
-    def test_wait_loop_works_without_console(self) -> None:
-        payload = self._payload()
-        assert "timeout /t" not in payload  # dies instantly when detached
-        assert "ping -n 2 127.0.0.1 >nul" in payload  # console-free ~1s delay
-        assert "setlocal enabledelayedexpansion" in payload
-        # delayed expansion counter — %tries% never advances inside a block
-        assert "if !tries! GEQ 90 goto forcekill" in payload
-
-    def test_wedged_process_is_force_killed(self) -> None:
-        payload = self._payload()
-        assert "taskkill /PID %TARGET_PID% /F" in payload
-
-    def test_every_step_is_logged(self) -> None:
-        payload = self._payload()
-        assert "update-apply.log" in payload
-        assert (
-            'robocopy "%STAGE%" "%APP_DIR%" /E /NFL /NDL /NJH /NJS /NP /R:2 /W:1 >> "%LOG%"'
-            in payload
-        )
-        assert "robocopy exit=!rc!" in payload
-        assert "apply FAILED" in payload
-        assert "apply OK" in payload
-
-    def test_failure_keeps_staging_and_relaunches_old_exe(self) -> None:
-        payload = self._payload()
-        # both the success and the failure path must bring the app back up
-        assert payload.count('start "" "%APP_DIR%\\MT5TradingWorkstation.exe"') == 2
-        # the fail branch must come after the rc check and skip rmdir
-        fail_index = payload.index(":fail")
-        assert payload.index("if !rc! GEQ 8 goto fail") < fail_index
-        assert 'rmdir /s /q "%STAGE%"' in payload
-        assert payload.index('rmdir /s /q "%STAGE%"') < fail_index
-
-    def test_removed_paths_use_windows_separators(self) -> None:
-        payload = self._payload(removed=("sub/ancient.pdb",))
-        assert 'del /f /q "%APP_DIR%\\sub\\ancient.pdb"' in payload
-
-
-def test_ascii_safe_path_is_identity_off_windows(tmp_path: pathlib.Path) -> None:
-    from app.updater.service import ascii_safe_path
-
-    if sys.platform == "win32":  # pragma: no cover - CI runs both platforms
-        # On Windows the helper may legitimately return an 8.3 alias; the
-        # identity contract only holds off-Windows.
-        pytest.skip("identity contract is non-Windows specific")
-    assert ascii_safe_path(tmp_path) == tmp_path
+    assert "--update-pid" in command  # current pid, passed at spawn time
 
 
 def test_app_dir_writable_probe(tmp_path: pathlib.Path) -> None:
@@ -283,25 +217,14 @@ class TestPendingStagedUpdate:
         (staging / "manifest.json").write_text(
             json.dumps({"version": version, "files": {}}), encoding="utf-8"
         )
-        service.apply_script_path(version).write_text("bat", encoding="ascii")
 
     def test_complete_staging_is_detected(self, tmp_path: pathlib.Path) -> None:
         service = _service(tmp_path, FakeFetcher())
         self._staged(service, "0.6.0")
         assert service.pending_staged_update() == "0.6.0"
 
-    def test_missing_script_is_ignored(self, tmp_path: pathlib.Path) -> None:
-        service = _service(tmp_path, FakeFetcher())
-        staging = staging_root(service.app_dir, "0.6.0")
-        staging.mkdir(parents=True)
-        (staging / "manifest.json").write_text(
-            json.dumps({"version": "0.6.0", "files": {}}), encoding="utf-8"
-        )
-        assert service.pending_staged_update() is None
-
     def test_missing_staging_manifest_is_ignored(self, tmp_path: pathlib.Path) -> None:
         service = _service(tmp_path, FakeFetcher())
-        service.apply_script_path("0.6.0").write_text("bat", encoding="ascii")
         staging_root(service.app_dir, "0.6.0").mkdir()
         assert service.pending_staged_update() is None
 
@@ -337,10 +260,11 @@ class TestCleanupStaleArtifacts:
         assert staging_root(service.app_dir, "0.5.8").exists() is False
         assert staging_root(service.app_dir, "0.5.9").exists() is False
         assert staging_root(service.app_dir, "0.6.0").exists()
-        assert (parent / "apply_update_0.6.0.bat").is_file()
         assert (parent / ".removed_0.6.0.txt").is_file()
-        assert (parent / "apply_update_0.5.8.bat").exists() is False
         assert (parent / ".removed_0.5.9.txt").exists() is False
+        # legacy 0.6.x .bat scripts are swept unconditionally
+        for version in ("0.5.8", "0.5.9", "0.6.0"):
+            assert (parent / f"apply_update_{version}.bat").exists() is False
 
     def test_download_and_stage_cleans_before_staging(
         self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
@@ -370,23 +294,35 @@ class TestCleanupStaleArtifacts:
         assert stale.exists() is False
 
 
-def test_write_apply_script_adds_chcp_for_non_ascii_paths(
+def test_write_staged_manifest_keeps_delta_chain_alive(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """When 8.3 short names cannot ASCII-fy the path, cmd must read UTF-8."""
-    service = _service(tmp_path, FakeFetcher())
+    """After a delta install the installed manifest must say the NEW version.
 
-    def fake_ascii(path: pathlib.Path) -> pathlib.Path:
-        return pathlib.Path(str(path) + "نسخه")
-
-    monkeypatch.setattr("app.updater.service.ascii_safe_path", fake_ascii)
-    staging = staging_root(service.app_dir, "0.6.0")
-    staging.mkdir(parents=True)
-    plan = UpdatePlan(current_version="0.5.0", new_version="0.6.0", mode="delta", release_page="")
-    service._write_apply_script(plan, staging)
-    text = service.apply_script_path("0.6.0").read_text(encoding="utf-8")
-    assert "chcp 65001" in text
-    assert "نسخه" in text  # the non-ASCII path survived (not dropped)
+    Regression: a delta zip can never carry manifest.json (the manifest
+    excludes itself, so it never appears in a diff) — the updated install
+    kept the OLD manifest and the next check probed a nonexistent delta
+    name, silently falling back to a 165 MB full download.
+    """
+    monkeypatch.setattr("app.updater.service.UpdateService.enabled", property(lambda self: True))
+    app_dir = tmp_path / "MT5TradingWorkstation"
+    _make_tree(app_dir, {"app.exe": b"old-exe"})
+    local_manifest = build_manifest(app_dir, "0.5.0")
+    (app_dir / "manifest.json").write_text(json.dumps(local_manifest), encoding="utf-8")
+    new_tree = tmp_path / "new"
+    _make_tree(new_tree, {"app.exe": b"new-exe"})
+    remote_manifest = build_manifest(new_tree, "0.6.0")
+    manifest_url = latest_manifest_url("test/repo")
+    delta_url = delta_zip_url("0.6.0", "0.5.0", "test/repo")
+    delta = _delta_zip(tmp_path, {"app.exe": b"new-exe"}, [])
+    fetcher = FakeFetcher(manifests={manifest_url: remote_manifest}, zips={delta_url: delta})
+    service = _service(tmp_path, fetcher)
+    result = service.check()
+    assert result.plan is not None
+    staging = service.download_and_stage(result.plan)
+    staged = load_manifest(staging)
+    assert staged is not None
+    assert staged["version"] == "0.6.0"  # NEW version, not the old one
 
 
 # -- service pipeline -----------------------------------------------------------------------
@@ -469,7 +405,8 @@ def test_full_download_when_no_local_manifest(
     assert result.plan.mode == "full"
     staging = service.download_and_stage(result.plan)
     assert (staging / "MT5TradingWorkstation.exe").read_bytes() == b"new-exe"
-    assert service.apply_script_path("0.6.0").is_file()
+    staged = load_manifest(staging)
+    assert staged is not None and staged["version"] == "0.6.0"
     assert verify_tree(staging, manifest) == []
 
 
@@ -500,10 +437,11 @@ def test_delta_download_stages_only_changed_files(
     assert result.plan.mode == "delta"
     staging = service.download_and_stage(result.plan)
     assert (staging / "app.exe").read_bytes() == b"new-exe"
-    # only the changed file was staged (delta semantics)
-    assert sorted(p.name for p in staging.iterdir()) == ["app.exe"]
-    payload = service.apply_script_path("0.6.0").read_text(encoding="utf-8")
-    assert "old.dll" in payload  # removed file is honoured by the apply script
+    # only the changed file was staged (delta semantics) + the new manifest
+    assert sorted(p.name for p in staging.iterdir()) == ["app.exe", "manifest.json"]
+    # the removed file is recorded for the installer
+    removed_text = (service.app_dir.parent / ".removed_0.6.0.txt").read_text(encoding="utf-8")
+    assert "old.dll" in removed_text
 
 
 def test_corrupt_delta_is_rejected(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -550,3 +488,41 @@ def test_update_plan_mode_key(tmp_path: pathlib.Path) -> None:
     assert plan.mode_key == "updates.mode.delta"
     full = UpdatePlan(current_version="0.5.0", new_version="0.6.0", mode="full", release_page="")
     assert full.mode_key == "updates.mode.full"
+
+
+# -- network hardening ------------------------------------------------------------------
+
+
+def test_detect_proxy_is_none_or_usable_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(urllib.request, "getproxies", lambda: {})
+    assert detect_proxy() is None
+    monkeypatch.setattr(urllib.request, "getproxies", lambda: {"https": "127.0.0.1:8118"})
+    # registry-style values without a scheme get http:// (CONNECT relay)
+    assert detect_proxy() == "http://127.0.0.1:8118"
+
+
+def test_detect_proxy_prefers_https_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        urllib.request,
+        "getproxies",
+        lambda: {"http": "http://a:1", "https": "socks5://b:2"},
+    )
+    assert detect_proxy() == "socks5://b:2"
+
+
+def test_network_unreachable_marker() -> None:
+    exc = NetworkUnreachable("details here")
+    assert NetworkUnreachable.MARKER in str(exc)
+    assert "details here" in str(exc)
+
+
+def test_fetch_json_wraps_transport_failure_in_network_unreachable(
+    tmp_path: pathlib.Path,
+) -> None:
+    from app.updater.github import ReleaseFetcher
+
+    fetcher = ReleaseFetcher(proxy="http://127.0.0.1:9")  # nothing listens here
+    # retries push the total wait to a few seconds — acceptable for one test
+    with pytest.raises(Exception) as excinfo:
+        fetcher.fetch_json("http://127.0.0.1:9/manifest.json")
+    assert "github unreachable" in str(excinfo.value).lower()
