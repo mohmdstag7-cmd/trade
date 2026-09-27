@@ -128,6 +128,24 @@ def _build_parser() -> argparse.ArgumentParser:
         default="",
         help="override the application data directory (used with --db-check)",
     )
+    update = parser.add_argument_group("update installer (internal)")
+    update.add_argument(
+        "--apply-update",
+        action="store_true",
+        help="install a staged update: swap the staging tree over this install, "
+        "then relaunch the app (used by the in-app updater, not meant for humans)",
+    )
+    update.add_argument(
+        "--update-staging",
+        default="",
+        help="staging directory holding the downloaded update (with --apply-update)",
+    )
+    update.add_argument(
+        "--update-pid",
+        type=int,
+        default=0,
+        help="process id of the running app to wait for (with --apply-update)",
+    )
     mt5 = parser.add_argument_group("MT5 connection")
     mt5.add_argument("--login", type=int, default=0, help="MT5 account number")
     mt5.add_argument("--server", default="", help="broker server name, e.g. MetaQuotes-Demo")
@@ -600,6 +618,29 @@ def _startup_update_check(window: Any) -> None:
     window._startup_update_worker.start()
 
 
+def run_apply_update_cli(args: argparse.Namespace) -> int:
+    """Installer mode: swap a staged update, relaunch, return an exit code.
+
+    Deliberately prints nothing to stdout — the helper usually runs
+    console-less and detached (an invalid stdout makes ``print`` raise).
+    Diagnostics go to ``update-apply.log`` instead.
+    """
+    import pathlib
+
+    from app.updater.apply import run_apply_update
+    from app.updater.service import app_install_dir
+
+    staging_text = args.update_staging.strip()
+    if not staging_text:
+        return 2
+    staging = pathlib.Path(staging_text)
+    return run_apply_update(
+        app_install_dir(),
+        staging,
+        parent_pid=args.update_pid,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point. Returns a process exit code."""
     parser = _build_parser()
@@ -616,6 +657,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_mt5_trade_test(args)
     if args.db_check:
         return run_db_check(args)
+    if args.apply_update:
+        return run_apply_update_cli(args)
     return run_gui(debug=args.debug)
 
 

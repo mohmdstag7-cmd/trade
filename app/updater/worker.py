@@ -1,15 +1,18 @@
-"""Qt worker thread wrapping the synchronous :class:`UpdateService`.
+"""Qt worker threads wrapping the synchronous :class:`UpdateService`.
 
-One worker instance runs one pipeline:
+Three workers cover the update lifecycle:
 
-- ``mode="check"`` — version check only (startup + button).
-- ``mode="update"`` — check → download+stage (with progress) → ready.
-
-All results travel through signals; the UI thread only reacts.
+- :class:`UpdateWorker` — ``check`` (version probe) or ``update``
+  (check → download+stage with progress).
+- :class:`ElevateWorker` — start the ``--apply-update`` installer
+  elevated via PowerShell UAC, reporting whether the user actually
+  approved it. Never a silent no-op: a declined UAC prompt must land
+  as a visible message, not an app that just quits.
 """
 
 from __future__ import annotations
 
+import subprocess
 from typing import Any
 
 from PySide6.QtCore import QThread, Signal
@@ -69,3 +72,65 @@ class UpdateWorker(QThread):
         except Exception as exc:
             log.opt(exception=True).error("updates: download/stage failed")
             self.stage_finished.emit(False, str(exc), None)
+
+
+class ElevateWorker(QThread):
+    """Start the ``--apply-update`` installer elevated (UAC), report outcome.
+
+    Runs PowerShell ``Start-Process -Verb RunAs -PassThru`` synchronously
+    and reports whether the elevated process was actually CREATED —
+    ``Start-Process`` raises when the user declines the UAC prompt, which
+    previously meant a silently aborted install.
+    """
+
+    #: (started, error_message)
+    started = Signal(bool, str)
+
+    def __init__(self, command: list[str], parent: Any = None) -> None:
+        super().__init__(parent)
+        self._command = command
+
+    @staticmethod
+    def _ps_quote(value: str) -> str:
+        """Single-quote for PowerShell; embedded quotes doubled."""
+        return "'" + value.replace("'", "''") + "'"
+
+    def _build_script(self) -> str:
+        exe = self._ps_quote(self._command[0])
+        args = ", ".join(self._ps_quote(arg) for arg in self._command[1:])
+        return (
+            "try { "
+            f"$p = Start-Process -FilePath {exe} -ArgumentList {args} "
+            "-Verb RunAs -PassThru -ErrorAction Stop; "
+            "if ($p) { exit 0 } else { exit 1 } "
+            "} catch { exit 1 }"
+        )
+
+    def run(self) -> None:
+        script = self._build_script()
+        try:
+            completed = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    script,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            log.warning("updates: elevation spawn failed: {}", repr(exc))
+            self.started.emit(False, str(exc))
+            return
+        ok = completed.returncode == 0
+        if not ok:
+            log.warning(
+                "updates: elevation declined or failed (exit {})",
+                completed.returncode,
+            )
+        self.started.emit(ok, "" if ok else f"exit {completed.returncode}")

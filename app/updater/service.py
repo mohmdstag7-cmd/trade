@@ -4,14 +4,20 @@ The :class:`UpdateService` is synchronous and framework-free. Errors are
 typed (:class:`UpdaterError`) so the UI worker can present them. Every
 downloaded byte is verified against the *new* release manifest before it
 may touch the staging area — and nothing touches the installed tree until
-the user restarts, at which point a generated ``apply_update_<v>.bat``
-(a) waits for this process to exit (ping-based delay — ``timeout`` cannot
-run in a detached console-less script), (b) force-kills a wedged process
-after a 90 s grace period, (c) copies the staged tree over the app
-folder, (d) deletes the files the new release removed, (e) relaunches the
-app, and (f) logs every step to ``%LOCALAPPDATA%\\MT5TradingWorkstation\\
-update-apply.log``. On robocopy failure the staging tree is kept so the
-next start offers a retry instead of a silent re-download.
+the user restarts, at which point the app's own executable re-launches
+itself in the ``--apply-update`` helper mode (:mod:`app.updater.apply`):
+wait for this process to exit, move the staged files over the install
+folder (per-file retries, rename-aside for locked files), delete the
+files the new release removed, verify the result against the staged
+manifest, relaunch the app and log every step to
+``%LOCALAPPDATA%\\MT5TradingWorkstation\\update-apply.log``. On failure
+the staging tree is kept so the next start offers a retry instead of a
+silent re-download.
+
+The staged tree always receives the NEW release's ``manifest.json`` —
+a delta zip cannot contain it (the manifest excludes itself), and
+without it the next check would probe a stale delta name and fall back
+to a 165 MB full download.
 """
 
 from __future__ import annotations
@@ -34,6 +40,7 @@ from app.updater.github import (
     releases_page_url,
 )
 from app.updater.manifest import (
+    MANIFEST_NAME,
     diff_manifests,
     load_manifest,
     manifest_version,
@@ -44,49 +51,17 @@ from app.updater.version import is_newer, parse_version
 
 #: Payload file inside a delta zip describing removed files + metadata.
 _DELTA_META = "__delta__.json"
-_EXE_NAME = "MT5TradingWorkstation.exe"
 _APPLY_LOG_DIRNAME = "MT5TradingWorkstation"
 _APPLY_LOG_NAME = "update-apply.log"
-
-#: Windows process-creation flags: detached so the batch script survives
-#: this process exiting, new process group so Ctrl-C is never inherited.
-_DETACHED = 0x00000008 | 0x00000200
-
-
-def ascii_safe_path(path: pathlib.Path) -> pathlib.Path:
-    """Best-effort ASCII-only form of ``path`` (Windows 8.3 short name).
-
-    ``cmd.exe`` parses batch files with the legacy OEM codepage, so a
-    Persian (or any non-ASCII) user profile name inside the script gets
-    mangled and robocopy never finds the folder. ``GetShortPathNameW``
-    returns a pure-ASCII alias when 8.3 names are enabled on the volume;
-    when they are not (or on other platforms) the path is returned
-    unchanged and the caller falls back to writing the script as UTF-8
-    with ``chcp 65001``.
-    """
-    if os.name != "nt":
-        return path
-    try:
-        import ctypes
-
-        windll = getattr(ctypes, "windll", None)
-        if windll is None:  # pragma: no cover - non-Windows
-            return path
-        buffer = ctypes.create_unicode_buffer(32768)
-        size = windll.kernel32.GetShortPathNameW(str(path), buffer, len(buffer))
-        if 0 < size < len(buffer) and buffer.value.isascii():
-            return pathlib.Path(buffer.value)
-    except OSError:  # pragma: no cover - defensive
-        pass
-    return path
 
 
 def app_dir_writable(app_dir: pathlib.Path) -> bool:
     """True when the install tree accepts writes without elevation.
 
     ``os.access`` alone lies for UAC-protected directories, so a real
-    touch probe is used. Installer installs under ``Program Files`` are
-    not writable → the apply script must run elevated.
+    touch probe is used. Rare for this app — both the portable zip and
+    the installer live under ``%LOCALAPPDATA%`` — but keep the guard:
+    a manually relocated install may sit somewhere protected.
     """
     try:
         probe = app_dir / ".updater_write_probe"
@@ -152,80 +127,6 @@ def app_install_dir() -> pathlib.Path:
     if getattr(sys, "frozen", False):
         return pathlib.Path(sys.executable).resolve().parent
     return pathlib.Path(__file__).resolve().parents[2]
-
-
-def apply_script_payload(
-    app_dir: pathlib.Path,
-    staging: pathlib.Path,
-    pid: int,
-    removed: tuple[str, ...],
-) -> str:
-    """Render the Windows batch script that performs the swap on restart.
-
-    Kept as a pure function so tests can assert on the exact commands
-    without touching the filesystem.
-
-    Design notes (each one exists because the first version failed in the
-    field — the update downloaded but never installed):
-
-    - the script runs DETACHED (no console). ``timeout /t 1`` REQUIRES a
-      console and dies instantly there, so the wait loop must delay with
-      ``ping -n 2 127.0.0.1`` instead — otherwise robocopy races the
-      still-running app and every locked file fails to copy;
-    - the retry counter is read with delayed expansion (``!tries!``) —
-      ``%tries%`` inside a block expands at parse time and never counts;
-    - every step appends to a log under ``%LOCALAPPDATA%`` so failures
-      are diagnosable from the app;
-    - if robocopy still fails (exit ≥ 8) the staging tree is KEPT so the
-      next start can offer a retry, and the (old) app is relaunched so
-      the user is never left with nothing;
-    - if the app refuses to exit within 90 s it is force-killed — a
-      crashed teardown must not wedge the updater forever.
-    """
-    lines = [
-        "@echo off",
-        "setlocal enabledelayedexpansion",
-        f'set "APP_DIR={app_dir}"',
-        f'set "STAGE={staging}"',
-        f'set "TARGET_PID={pid}"',
-        'set "LOGDIR=%LOCALAPPDATA%\\' + _APPLY_LOG_DIRNAME + '"',
-        'if not exist "%LOGDIR%" mkdir "%LOGDIR%" 2>nul',
-        'set "LOG=%LOGDIR%\\' + _APPLY_LOG_NAME + '"',
-        'echo [%date% %time%] apply start pid=%TARGET_PID% >> "%LOG%"',
-        "set /a tries=0",
-        ":waitloop",
-        'tasklist /FI "PID eq %TARGET_PID%" 2>nul | find "%TARGET_PID%" >nul',
-        "if errorlevel 1 goto waitdone",
-        "set /a tries+=1",
-        "if !tries! GEQ 90 goto forcekill",
-        "ping -n 2 127.0.0.1 >nul",
-        "goto waitloop",
-        ":forcekill",
-        'echo app still running after 90s — force closing >> "%LOG%"',
-        "taskkill /PID %TARGET_PID% /F >nul 2>&1",
-        "ping -n 4 127.0.0.1 >nul",
-        ":waitdone",
-        'echo app exited — applying staged tree >> "%LOG%"',
-    ]
-    lines.extend(f'del /f /q "%APP_DIR%\\{rel.replace("/", chr(92))}" 2>nul' for rel in removed)
-    lines += [
-        'robocopy "%STAGE%" "%APP_DIR%" /E /NFL /NDL /NJH /NJS /NP /R:2 /W:1 >> "%LOG%" 2>&1',
-        "set rc=!errorlevel!",
-        'echo robocopy exit=!rc! >> "%LOG%"',
-        "if !rc! GEQ 8 goto fail",
-        'rmdir /s /q "%STAGE%" 2>nul',
-        'cd /d "%APP_DIR%"',
-        f'start "" "%APP_DIR%\\{_EXE_NAME}"',
-        'echo apply OK >> "%LOG%"',
-        "endlocal",
-        "exit /b 0",
-        ":fail",
-        'echo apply FAILED — staging kept for retry >> "%LOG%"',
-        f'start "" "%APP_DIR%\\{_EXE_NAME}"',
-        "endlocal",
-        "exit /b !rc!",
-    ]
-    return "\r\n".join(lines) + "\r\n"
 
 
 class UpdateService:
@@ -330,7 +231,6 @@ class UpdateService:
         except Exception as exc:
             shutil.rmtree(staging, ignore_errors=True)
             raise UpdaterError(str(exc)) from exc
-        self._write_apply_script(plan, staging)
         return staging
 
     # -- staging internals -------------------------------------------------------
@@ -370,6 +270,7 @@ class UpdateService:
         problems = verify_tree(staging, remote, subset=set(diff.changed))
         if problems:
             raise UpdaterError(f"verification failed for: {', '.join(problems[:5])}")
+        self._write_staged_manifest(staging, remote)
         self._write_removed_list(plan, removed)
 
     def _stage_full(
@@ -395,6 +296,20 @@ class UpdateService:
         problems = verify_tree(staging, remote)
         if problems:
             raise UpdaterError(f"verification failed for: {', '.join(problems[:5])}")
+        self._write_staged_manifest(staging, remote)
+
+    def _write_staged_manifest(self, staging: pathlib.Path, remote: dict[str, Any]) -> None:
+        """Embed the NEW release manifest in the staging tree.
+
+        A delta zip can never carry ``manifest.json`` (the manifest
+        excludes itself, so it is absent from every diff) — without this
+        the freshly updated install would keep the OLD manifest and the
+        next check would probe a stale delta name and fall back to a
+        full 165 MB download.
+        """
+        (staging / MANIFEST_NAME).write_text(
+            json.dumps(remote, indent=1, sort_keys=True), encoding="utf-8"
+        )
 
     # -- apply helpers --------------------------------------------------------------
     def _removed_list_path(self, new_version: str) -> pathlib.Path:
@@ -404,48 +319,40 @@ class UpdateService:
         """Persist deletions next to (not inside) the staging tree."""
         self._removed_list_path(plan.new_version).write_text("\n".join(removed), encoding="utf-8")
 
-    def _read_removed_list(self, new_version: str) -> tuple[str, ...]:
-        marker = self._removed_list_path(new_version)
-        if not marker.is_file():
-            return ()
-        lines = [
-            line.strip().replace("\\", "/")
-            for line in marker.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
-        return tuple(lines)
+    def apply_update_command(self, new_version: str) -> list[str]:
+        """Argv that turns THIS executable into the update installer.
 
-    def _write_apply_script(self, plan: UpdatePlan, staging: pathlib.Path) -> None:
-        removed = self._read_removed_list(plan.new_version)
-        script = staging.parent / f"apply_update_{plan.new_version}.bat"
-        payload = apply_script_payload(
-            ascii_safe_path(self._app_dir),
-            ascii_safe_path(staging),
-            os.getpid(),
-            removed,
-        )
-        if not payload.isascii():
-            # 8.3 names unavailable for a non-ASCII install path (e.g. a
-            # Persian user profile): cmd must read the file as UTF-8.
-            payload = payload.replace("@echo off", "@echo off\r\nchcp 65001 >nul", 1)
-        script.write_text(payload, encoding="utf-8")
+        The frozen exe is re-run in the ``--apply-update`` helper mode
+        (see :mod:`app.updater.apply`): no cmd.exe, no batch codepage
+        traps, native Unicode paths, and the parent PID is passed at
+        spawn time — never baked into a stale script.
+        """
+        staging = staging_root(self._app_dir, new_version)
+        command = [sys.executable, "--apply-update", "--update-staging", str(staging)]
+        pid = os.getpid()
+        if pid > 0:
+            command += ["--update-pid", str(pid)]
+        return command
 
     def pending_staged_update(self) -> str | None:
         """Version of a fully staged update awaiting restart, if any.
 
-        A staging tree counts as usable only when its apply script is
-        present AND its embedded manifest matches that version AND the
-        version is actually newer than the running one — anything else is
-        leftover debris from a failed attempt and gets cleaned up.
+        A staging tree counts as usable only when its embedded manifest
+        matches the version encoded in its directory name AND that
+        version is newer than the running one — anything else is
+        leftover debris from a failed attempt.
         """
         parent = staging_parent(self._app_dir)
-        for script in sorted(parent.glob("apply_update_*.bat")):
-            version = script.stem.removeprefix("apply_update_")
+        prefix = f"{self._app_dir.name}.update-"
+        for child in sorted(parent.glob(f"{prefix}*")):
+            if not child.is_dir():
+                continue
+            version = child.name.removeprefix(prefix)
             try:
                 parse_version(version)
             except ValueError:
                 continue
-            local = load_manifest(staging_root(self._app_dir, version))
+            local = load_manifest(child)
             if (
                 local is not None
                 and manifest_version(local) == version
@@ -455,7 +362,7 @@ class UpdateService:
         return None
 
     def cleanup_stale_artifacts(self, keep_version: str | None = None) -> None:
-        """Delete staging trees / apply scripts / removed-lists of failed
+        """Delete staging trees / removed-lists / legacy scripts of failed
         past attempts so they never accumulate next to the app folder."""
         parent = staging_parent(self._app_dir)
         prefix = f"{self._app_dir.name}.update-"
@@ -463,16 +370,11 @@ class UpdateService:
             if child.is_dir() and child.name != f"{prefix}{keep_version}":
                 shutil.rmtree(child, ignore_errors=True)
         for script in parent.glob("apply_update_*.bat"):
-            if script.stem.removeprefix("apply_update_") != keep_version:
-                script.unlink(missing_ok=True)
+            script.unlink(missing_ok=True)  # legacy 0.6.x leftovers
         for marker in parent.glob(".removed_*.txt"):
             version = marker.name.removeprefix(".removed_").removesuffix(".txt")
             if version != keep_version:
                 marker.unlink(missing_ok=True)
-
-    def apply_script_path(self, new_version: str) -> pathlib.Path:
-        """Path of the prepared apply script (written right after staging)."""
-        return staging_parent(self._app_dir) / f"apply_update_{new_version}.bat"
 
 
 def staging_parent(app_dir: pathlib.Path) -> pathlib.Path:
