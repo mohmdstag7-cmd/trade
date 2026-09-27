@@ -239,6 +239,9 @@ EN: dict[str, str] = {
     "updates.last_failed": "The previous install attempt failed — v{version} is ready; click “Restart & install” to retry.",
     "updates.restart_windows_only": "Automatic install works on Windows — download the portable zip from the releases page.",
     "updates.elevated": "Windows may ask for administrator permission to install v{version}.",
+    "updates.network": "Could not reach GitHub. Check your internet connection or VPN/proxy, then try again.",
+    "updates.installing": "Preparing the installer for v{version} — the app will close and reopen automatically.",
+    "updates.install_start_failed": "The update installer could not start: {error}",
 }
 
 FA: dict[str, str] = {
@@ -462,6 +465,9 @@ FA: dict[str, str] = {
     "updates.last_failed": "تلاش قبلی برای نصب ناموفق بود — نسخه v{version} آماده است؛ برای تلاش دوباره روی «راه‌اندازی مجدد و نصب» بزنید.",
     "updates.restart_windows_only": "نصب خودکار فقط در ویندوز کار می‌کند — فایل portable را از صفحه انتشارها دانلود کنید.",
     "updates.elevated": "ویندوز ممکن است برای نصب v{version} اجازه مدیر (UAC) را درخواست کند.",
+    "updates.network": "اتصال به GitHub برقرار نشد. اتصال اینترنت یا VPN/پروکسی را بررسی کنید و دوباره تلاش کنید.",
+    "updates.installing": "در حال آماده‌سازی نصب‌کننده برای v{version} — برنامه به‌طور خودکار بسته و دوباره باز می‌شود.",
+    "updates.install_start_failed": "نصب‌کننده به‌روزرسانی اجرا نشد: {error}",
 }
 
 #: All string dictionaries, keyed by language code.

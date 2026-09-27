@@ -48,13 +48,15 @@ from app.storage.vault import KeyringVault, VaultError
 from app.ui.i18n.translator import Translator
 from app.ui.theme.manager import ThemeManager
 from app.ui.workers import ConnectWorker
+from app.updater.github import NetworkUnreachable
 from app.updater.service import (
     CheckResult,
     UpdateService,
     app_dir_writable,
     read_apply_log_tail,
+    staging_root,
 )
-from app.updater.worker import UpdateWorker
+from app.updater.worker import ElevateWorker, UpdateWorker
 
 _PROBE_POLL_MS = 150
 _STORAGE_POLL_MS = 2000
@@ -66,6 +68,28 @@ _SERVER_SUSPICIOUS_RE = re.compile(r"[&!@$%^*+=~|<>{}\[\];?`#\"']")
 
 #: Maximum width of the centered settings column.
 COLUMN_WIDTH = 780
+
+
+def _friendly_update_error(error: str, tr: Any) -> str:
+    """Translate raw updater/network failures into human hints.
+
+    The most common field failure is GitHub being unreachable (Iranian
+    networks, VPN/proxy tools that the HTTP client cannot see) — a raw
+    ``httpx.ConnectError`` repr tells the user nothing, so it is mapped
+    to a translated hint while keeping the detail appended.
+    """
+    markers = (
+        NetworkUnreachable.MARKER,
+        "ConnectError",
+        "ConnectTimeout",
+        "ReadTimeout",
+        "getaddrinfo failed",
+        "Network is unreachable",
+        "timed out",
+    )
+    if any(marker.lower() in error.lower() for marker in markers):
+        return f"{tr('updates.network')} ({error})"
+    return error
 
 
 def _card() -> QFrame:
@@ -105,6 +129,7 @@ class SettingsPage(QWidget):
         self._shared_gateway = shared_gateway
         self._updater = updater or UpdateService(current_version=__version__)
         self._update_worker: UpdateWorker | None = None
+        self._elevation_worker: ElevateWorker | None = None
         self._staged_version: str | None = None
         self._probe: ConnectionProbe | None = None
         self._cloud_probe: CloudProbe | None = None
@@ -352,15 +377,14 @@ class SettingsPage(QWidget):
 
     def _on_update_check_done(self, result: object, error: str) -> None:
         tr = self._tr
-        if error:
-            self._update_status_label.setText(tr("updates.failed", error=error))
+        shown = error or (result.error if isinstance(result, CheckResult) else "")
+        if shown:
+            self._update_status_label.setText(
+                tr("updates.failed", error=_friendly_update_error(shown, tr))
+            )
             self._update_check_button.setEnabled(True)
             return
         assert isinstance(result, CheckResult)
-        if result.error:
-            self._update_status_label.setText(tr("updates.failed", error=result.error))
-            self._update_check_button.setEnabled(True)
-            return
         if not result.available:
             self._update_status_label.setText(tr("updates.up_to_date", version=__version__))
             self._update_check_button.setEnabled(True)
@@ -385,51 +409,56 @@ class SettingsPage(QWidget):
             self._update_restart_button.setVisible(True)
             self._update_check_button.setEnabled(False)
         else:
-            self._update_status_label.setText(self._tr("updates.failed", error=message))
+            self._update_status_label.setText(
+                self._tr("updates.failed", error=_friendly_update_error(message, self._tr))
+            )
             self._update_check_button.setEnabled(True)
 
     def _on_restart_and_install(self) -> None:
-        """Launch the apply script detached, then quit so it can swap files.
+        """Spawn the ``--apply-update`` installer, then quit so it can swap.
 
         Never a silent no-op: every failure mode (staged version missing,
-        script missing, spawn error) lands a visible message on the
-        updates card — the old version returned silently and users kept
-        clicking a button that did nothing.
+        spawn error, declined UAC, helper dying instantly) lands a visible
+        message on the updates card. The app only quits once the helper
+        process is confirmed running — previously a failed spawn left the
+        user clicking a button that did nothing.
         """
         if self._staged_version is None:
             return
         if os.name != "nt":
             self._update_status_label.setText(self._tr("updates.restart_windows_only"))
             return
-        script = self._updater.apply_script_path(self._staged_version)
-        if not script.is_file():
+        staging = staging_root(self._updater.app_dir, self._staged_version)
+        if not staging.is_dir():
             self._update_status_label.setText(self._tr("updates.staged_missing"))
             self._update_restart_button.setVisible(False)
             self._update_check_button.setEnabled(True)
             self._staged_version = None
             return
+        command = self._updater.apply_update_command(self._staged_version)
         self._update_status_label.setText(
-            self._tr("updates.restarting", version=self._staged_version)
+            self._tr("updates.installing", version=self._staged_version)
         )
         self._update_restart_button.setEnabled(False)
         try:
             if app_dir_writable(self._updater.app_dir):
-                subprocess.Popen(
-                    ["cmd.exe", "/c", str(script)],
+                process = subprocess.Popen(
+                    command,
                     close_fds=True,
-                    cwd=str(script.parent),
-                    creationflags=0x00000008 | 0x00000200,
+                    cwd=str(self._updater.app_dir),
+                    creationflags=0x00000008 | 0x00000200,  # detached, new group
                 )
+                # Give the helper a moment; if it died instantly (antivirus
+                # block, corrupt exe) show it instead of quitting into a
+                # dead install.
+                QTimer.singleShot(1500, lambda: self._confirm_helper_started(process))
             else:
-                # Installer install (e.g. Program Files): robocopy needs
-                # elevation, so relaunch the script via UAC.
-                path_text = str(script).replace("'", "''")
-                ps_command = f"Start-Process -FilePath '{path_text}' -Verb RunAs"
-                subprocess.Popen(
-                    ["powershell", "-NoProfile", "-Command", ps_command],
-                    close_fds=True,
-                    creationflags=0x00000008 | 0x00000200,
-                )
+                # Rare: a relocated install without write access — the
+                # helper itself needs elevation. Report the outcome before
+                # quitting; a declined UAC prompt must be visible.
+                self._elevation_worker = ElevateWorker(command)
+                self._elevation_worker.started.connect(self._on_elevation_started)
+                self._elevation_worker.start()
                 self._update_status_label.setText(
                     self._tr("updates.elevated", version=self._staged_version)
                 )
@@ -437,6 +466,31 @@ class SettingsPage(QWidget):
             self._update_status_label.setText(self._tr("updates.failed", error=str(exc)))
             self._update_restart_button.setEnabled(True)
             return
+
+    def _confirm_helper_started(self, process: Any) -> None:
+        """Quit only when the installer process is alive after spawn."""
+        if process.poll() is None:
+            self._quit_for_update()
+            return
+        self._update_status_label.setText(
+            self._tr(
+                "updates.install_start_failed",
+                error=f"installer exited with code {process.returncode}",
+            )
+        )
+        self._update_restart_button.setEnabled(True)
+
+    def _on_elevation_started(self, ok: bool, error: str) -> None:
+        self._elevation_worker = None
+        if ok:
+            self._quit_for_update()
+            return
+        self._update_status_label.setText(
+            self._tr("updates.install_start_failed", error=error or "UAC declined")
+        )
+        self._update_restart_button.setEnabled(True)
+
+    def _quit_for_update(self) -> None:
         from PySide6.QtWidgets import QApplication
 
         app = QApplication.instance()
