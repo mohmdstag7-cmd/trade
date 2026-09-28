@@ -12,7 +12,7 @@
 | 3 | MT5 connection (real) | **merged** | PR #14 |
 | 4 | Storage | **merged** | PR #17 |
 | 5 | Market data & analysis | **merged** | PR #22 (`phase/05-market-data`) |
-| 5.5 | UI v2 + in-app updates (user request) | **in review** | `phase/06-ui-and-updates` |
+| 5.5 | UI v2 + in-app updates (user request) | **merged** | PR #24 (`phase/06-ui-and-updates`) |
 | 6 | Strategies & signals | not started | — (SPEC numbering unchanged) |
 | 7 | Risk | not started | — |
 | 8 | Execution | not started | — |
