@@ -89,8 +89,16 @@ jobs:
           }
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Install Inno Setup (version pinned for reproducible builds)
-        run: choco install innosetup --version 6.4.1 -y --no-progress
+      - name: Install Inno Setup (skip when ISCC is preinstalled)
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (Test-Path $iscc) {
+            Write-Host "Inno Setup 6 already present on the runner ($(& $iscc /? | Select-Object -First 1)) - skipping choco install."
+          } else {
+            choco install innosetup --version 6.4.1 -y --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
 
       - name: Build installer with Inno Setup
         shell: pwsh
