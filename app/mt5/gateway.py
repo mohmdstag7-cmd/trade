@@ -112,12 +112,13 @@ class MT5Gateway:
         self._thread: threading.Thread | None = None
 
         self._state = ConnectionState.DISCONNECTED
+        self._state_lock = threading.RLock()
         self._module: Any = None
         self._request: ConnectRequest | None = None
         self._account: AccountSnapshot | None = None
         self._stats = GatewayStats()
 
-        # reconnect bookkeeping (worker thread only)
+        # reconnect bookkeeping (worker thread only, guarded by _state_lock for cross-thread reads)
         self._reconnect_delay_s = reconnect_initial_s
         self._next_reconnect_at = 0.0
 
@@ -250,7 +251,8 @@ class MT5Gateway:
     @property
     def state(self) -> ConnectionState:
         """Current connection state (atomic enum read, safe from any thread)."""
-        return self._state
+        with self._state_lock:
+            return self._state
 
     @property
     def account(self) -> AccountSnapshot | None:
@@ -281,16 +283,21 @@ class MT5Gateway:
         if self._stop_event.is_set() or self._worker_exited.is_set():
             future.set_exception(MT5Error(code=0, description="gateway is stopped"))
             return future
-        if self._state is ConnectionState.RECONNECTING and not bypass_reconnect_guard:
-            # Fail fast instead of queueing behind an unknown backoff delay.
-            future.set_exception(
-                ConnectionLostError(
-                    RETCODE_CONNECTION,
-                    f"gateway is reconnecting (next attempt in ~{self._reconnect_delay_s:.1f}s)",
+        # RECONNECTING guard must be atomic with queue put: the worker mutates
+        # _state and _reconnect_delay_s without holding the GIL across the
+        # check, so a plain read+put races and can queue a command that should
+        # have failed fast or report a stale delay.
+        with self._state_lock:
+            if self._state is ConnectionState.RECONNECTING and not bypass_reconnect_guard:
+                # Fail fast instead of queueing behind an unknown backoff delay.
+                future.set_exception(
+                    ConnectionLostError(
+                        RETCODE_CONNECTION,
+                        f"gateway is reconnecting (next attempt in ~{self._reconnect_delay_s:.1f}s)",
+                    )
                 )
-            )
-            return future
-        self._queue.put((operation, fn, future))
+                return future
+            self._queue.put((operation, fn, future))
         if self._worker_exited.is_set():
             # Raced the worker's final drain — the queued item will never
             # run; fail the future here so the caller never hangs.
@@ -302,13 +309,13 @@ class MT5Gateway:
         while not self._stop_event.is_set():
             try:
                 self._beat()
-                if self._state is ConnectionState.RECONNECTING:
+                if self.state is ConnectionState.RECONNECTING:
                     # While reconnecting, only control commands are
                     # meaningful: execute a queued disconnect (cancels the
                     # loop) and fail everything else queued before the
                     # outage instead of letting futures hang forever.
                     self._drain_while_reconnecting()
-                    if self._state is not ConnectionState.RECONNECTING:
+                    if self.state is not ConnectionState.RECONNECTING:
                         continue
                     self._poll_reconnect()
                     continue
@@ -334,7 +341,7 @@ class MT5Gateway:
 
     def _drain_while_reconnecting(self) -> None:
         """Handle queued commands while RECONNECTING (worker thread only)."""
-        while self._state is ConnectionState.RECONNECTING and not self._stop_event.is_set():
+        while self.state is ConnectionState.RECONNECTING and not self._stop_event.is_set():
             try:
                 item = self._queue.get_nowait()
             except queue.Empty:
@@ -400,9 +407,10 @@ class MT5Gateway:
 
     # -- connection management ---------------------------------------------
     def _set_state(self, new_state: ConnectionState) -> None:
-        if new_state is self._state:
-            return
-        self._state = new_state
+        with self._state_lock:
+            if new_state is self._state:
+                return
+            self._state = new_state
         self._stats.state_history.append(f"{new_state.value}@{int(self._time_fn())}")
         log.info("gateway[{}]: state -> {}", self._name, new_state.value)
         callback = self._on_state_change
@@ -479,7 +487,8 @@ class MT5Gateway:
             )
         self._request = request
         self._account = snapshot
-        self._reconnect_delay_s = self._reconnect_initial_s
+        with self._state_lock:
+            self._reconnect_delay_s = self._reconnect_initial_s
         self._set_state(ConnectionState.CONNECTED)
         log.info(
             "gateway[{}]: connected login={} server={} mode={} balance={:.2f} {}",
@@ -499,7 +508,7 @@ class MT5Gateway:
                 self._module.shutdown()
             except Exception:  # pragma: no cover - shutdown must never raise
                 log.opt(exception=True).debug("gateway[{}]: shutdown() raised", self._name)
-        was_connected = self._state is ConnectionState.CONNECTED
+        was_connected = self.state is ConnectionState.CONNECTED
         self._account = None
         self._request = None
         self._set_state(ConnectionState.DISCONNECTED)
@@ -517,8 +526,9 @@ class MT5Gateway:
             # Never had a session (command fired before connect) — nothing to re-establish.
             log.warning("gateway[{}]: command rejected while disconnected ({})", self._name, exc)
             return
-        self._reconnect_delay_s = self._reconnect_initial_s
-        self._next_reconnect_at = self._time_fn() + self._reconnect_delay_s
+        with self._state_lock:
+            self._reconnect_delay_s = self._reconnect_initial_s
+            self._next_reconnect_at = self._time_fn() + self._reconnect_delay_s
         self._set_state(ConnectionState.RECONNECTING)
         log.warning("gateway[{}]: connection lost ({}), reconnecting…", self._name, exc)
 
@@ -530,8 +540,10 @@ class MT5Gateway:
             self._teardown_session()
             return
         now = self._time_fn()
-        if now < self._next_reconnect_at:
-            remaining = min(self._next_reconnect_at - now, _IDLE_POLL_S)
+        with self._state_lock:
+            next_at = self._next_reconnect_at
+        if now < next_at:
+            remaining = min(next_at - now, _IDLE_POLL_S)
             if self._stop_event.wait(remaining):
                 return
             self._beat()
@@ -548,11 +560,13 @@ class MT5Gateway:
             )
             self._teardown_session()
         except MT5Error as exc:
-            self._reconnect_delay_s = min(
-                self._reconnect_delay_s * self._reconnect_factor,
-                self._reconnect_max_s,
-            )
-            self._next_reconnect_at = self._time_fn() + self._reconnect_delay_s
+            with self._state_lock:
+                self._reconnect_delay_s = min(
+                    self._reconnect_delay_s * self._reconnect_factor,
+                    self._reconnect_max_s,
+                )
+                self._next_reconnect_at = self._time_fn() + self._reconnect_delay_s
+                delay = self._reconnect_delay_s
             # _establish() failure flipped the state through CONNECTING/DISCONNECTED;
             # re-arm RECONNECTING so the loop keeps trying.
             self._set_state(ConnectionState.RECONNECTING)
@@ -560,22 +574,24 @@ class MT5Gateway:
                 "gateway[{}]: reconnect attempt failed ({}) — next try in {:.1f}s",
                 self._name,
                 exc,
-                self._reconnect_delay_s,
+                delay,
             )
         except Exception as exc:
             # Unexpected (non-MT5Error) failure — treat as retryable so the
             # umbrella loop guard above is never the only line of defense.
-            self._reconnect_delay_s = min(
-                self._reconnect_delay_s * self._reconnect_factor,
-                self._reconnect_max_s,
-            )
-            self._next_reconnect_at = self._time_fn() + self._reconnect_delay_s
+            with self._state_lock:
+                self._reconnect_delay_s = min(
+                    self._reconnect_delay_s * self._reconnect_factor,
+                    self._reconnect_max_s,
+                )
+                self._next_reconnect_at = self._time_fn() + self._reconnect_delay_s
+                delay = self._reconnect_delay_s
             self._set_state(ConnectionState.RECONNECTING)
             log.opt(exception=True).warning(
                 "gateway[{}]: reconnect crashed ({}) — next try in {:.1f}s",
                 self._name,
                 exc,
-                self._reconnect_delay_s,
+                delay,
             )
 
     # -- raw call helpers ----------------------------------------------------
@@ -712,10 +728,10 @@ class MT5Gateway:
         return (self._time_fn() - started) * 1000.0
 
     def _require_connected(self, operation: str) -> None:
-        if self._state is not ConnectionState.CONNECTED:
+        if self.state is not ConnectionState.CONNECTED:
             raise ConnectionLostError(
                 RETCODE_CONNECTION,
-                f"{operation} requested while {self._state.value}",
+                f"{operation} requested while {self.state.value}",
             )
 
     def _select_symbol(self, symbol: str) -> bool:

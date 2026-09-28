@@ -205,11 +205,19 @@ def run_demo_trade_test(
     position = matching[0]
     outcome.position_ticket = position.ticket
 
+    # Fetch a fresh tick for the close — the tick used for the open is
+    # seconds old by now and may be outside the broker's deviation limit,
+    # causing RETCODE_INVALID_PRICE / PRICE_CHANGED and leaving the demo
+    # position open.
+    close_tick = gateway.wait_for_result(gateway.tick(broker_symbol), "tick", timeout_s)
+    if close_tick.bid <= 0:
+        raise DemoGuardError(f"no valid bid price for {broker_symbol} — market closed?")
+
     close_request = _base_request(symbol, constants, position.volume)
     close_request.update(
         type=_ORDER_TYPE_SELL,
         position=position.ticket,
-        price=_round_price(tick.bid, symbol.digits),
+        price=_round_price(close_tick.bid, symbol.digits),
         sl=0.0,
         tp=0.0,
     )
