@@ -25,6 +25,10 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 WizardStyle=modern
 UninstallDisplayIcon={app}\{#MyAppExeName}
+AppMutex=MT5TradingWorkstationSingleInstance
+CloseApplications=yes
+CloseApplicationsFilter=*.exe,*.dll
+UsePreviousAppDir=yes
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
