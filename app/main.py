@@ -21,6 +21,7 @@ structure of this module.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as _dt
 import importlib
 import json
@@ -194,7 +195,20 @@ def _resolve_password(args: argparse.Namespace, login: int, *, quiet: bool = Fal
     if args.password_stdin:
         if not quiet:
             print("Paste the account password and press Enter:")
-        return sys.stdin.readline().rstrip("\r\n")
+        # getpass() disables echo — a plain readline() would leave the
+        # broker password in the terminal scrollback (screen shares,
+        # shell transcripts). getpass's no-TTY fallback warns about echo
+        # (harmless for piped input) — keep pytest's warning-as-error and
+        # real terminals happy by suppressing it locally.
+        import getpass
+        import warnings
+
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                return getpass.getpass("")
+        except (OSError, ValueError):  # no /dev/tty at all
+            return sys.stdin.readline().rstrip("\r\n")
     if not quiet:
         print(
             "No password available. Either save it once via the app Settings page "
@@ -353,7 +367,7 @@ def run_db_check(args: argparse.Namespace) -> int:
     return 0 if stats["integrity_ok"] else 1
 
 
-def _build_market_service(bus: Any) -> tuple[Any, Any | None]:
+def _build_market_service(bus: Any) -> tuple[Any, Any | None, Any | None]:
     """Create the Phase 5 market analysis service (gateway optional).
 
     One long-lived gateway is owned by the app shell and shared with the
@@ -370,9 +384,17 @@ def _build_market_service(bus: Any) -> tuple[Any, Any | None]:
     from app.calendar.events import EventStore
     from app.calendar.importer import ExporterFilePoller
     from app.mt5.gateway import MT5Gateway
+    from app.observability.watchdog import Watchdog
 
     def _mirror_state(state: Any) -> None:
         bus.gateway_state_changed.emit(state.value, "")
+
+    # Watchdog sees the gateway's heartbeat (SPEC E3.9): every worker-loop
+    # iteration beats; 90 s of silence (well above any single 30 s terminal
+    # call) means the thread froze or died. Restart is log-only for now —
+    # respawning the terminal session is a Phase 13 concern.
+    watchdog = Watchdog(check_interval_s=5.0)
+    watchdog.start()
 
     gateway: MT5Gateway | None = None
     try:
@@ -380,9 +402,17 @@ def _build_market_service(bus: Any) -> tuple[Any, Any | None]:
             mt5_factory=_import_mt5,
             request_timeout_s=30.0,
             on_state_change=_mirror_state,
+            heartbeat=watchdog.heartbeat_factory("mt5-gateway"),
             name="shared",
         )
         gateway.start()
+
+        def _on_gateway_stall(name: str) -> None:
+            import loguru
+
+            loguru.logger.warning("watchdog: {} stalled — manual restart required (Phase 13)", name)
+
+        watchdog.register("mt5-gateway", timeout_s=90.0, restart=_on_gateway_stall)
     except Exception:  # pragma: no cover - never block startup on MT5
         import loguru
 
@@ -394,13 +424,17 @@ def _build_market_service(bus: Any) -> tuple[Any, Any | None]:
     store = EventStore(calendar_dir / "events.csv")
     poller = ExporterFilePoller(store, calendar_dir / "exporter.csv", interval_s=300.0)
     clock = BrokerClock(utc_now_fn=_time.time)
-    return MarketAnalysisService(
+    return (
+        MarketAnalysisService(
+            gateway,
+            watched=("EURUSD", "GBPUSD", "XAUUSD"),
+            clock=clock,
+            calendar_store=store,
+            calendar_poller=poller,
+        ),
         gateway,
-        watched=("EURUSD", "GBPUSD", "XAUUSD"),
-        clock=clock,
-        calendar_store=store,
-        calendar_poller=poller,
-    ), gateway
+        watchdog,
+    )
 
 
 def _maybe_auto_connect(gateway: Any, bus: Any) -> None:
@@ -442,33 +476,6 @@ def _maybe_auto_connect(gateway: Any, bus: Any) -> None:
     _maybe_auto_connect._worker = worker  # type: ignore[attr-defined]
 
 
-def _install_qt_message_filter() -> None:
-    """Route Qt messages to loguru; drop known third-party noise.
-
-    pyqtgraph connects to ``QStyleHints.colorSchemeChanged`` with a
-    UniqueConnection to a plain function, which Qt 6 logs as a warning
-    on every import. The message is harmless — we swallow exactly that
-    text and forward everything else.
-    """
-    from PySide6.QtCore import QtMsgType, qInstallMessageHandler
-
-    def _handler(mode: Any, context: Any, message: str) -> None:
-        import loguru
-
-        if "unique connections require a pointer to member function" in message:
-            return
-        if mode == QtMsgType.QtWarningMsg:
-            loguru.logger.warning("qt: {}", message)
-        elif mode == QtMsgType.QtCriticalMsg:
-            loguru.logger.error("qt: {}", message)
-        elif mode == QtMsgType.QtFatalMsg:
-            loguru.logger.critical("qt: {}", message)
-        else:
-            loguru.logger.debug("qt: {}", message)
-
-    qInstallMessageHandler(_handler)
-
-
 def run_gui(debug: bool = False) -> int:
     """Compose the application and start the Qt event loop."""
     log_state = init_logging(logs_dir=default_logs_dir(), debug=debug)
@@ -507,7 +514,25 @@ def run_gui(debug: bool = False) -> int:
     qt_app.setApplicationName("MT5 Trading Workstation")
     qt_app.setOrganizationName("MT5TradingWorkstation")
     qt_app.setStyle("Fusion")
-    _install_qt_message_filter()
+
+    # Single-instance guard: two concurrent instances would duplicate
+    # auto-connects, pollers and DB access — and both could stage updates
+    # whose helpers race the same install tree.
+    from PySide6.QtCore import QLockFile
+
+    lock = QLockFile(str(default_data_dir() / "app.lock"))
+    if not lock.tryLock(0):
+        import loguru
+
+        loguru.logger.error("app: another instance is already running (lock held) — exiting")
+        print("MT5 Trading Workstation is already running.")
+        shutdown_logging()
+        return 2
+
+    # Qt messages (warnings/criticals/fatals) are routed by the crash
+    # handler's Qt hook, installed above — including the pyqtgraph noise
+    # drop and the QtFatalMsg → crash-report path. No second handler here:
+    # installing one would silently replace (and kill) the report path.
 
     settings = UiSettings.load()
     translator = Translator(settings)
@@ -538,7 +563,7 @@ def run_gui(debug: bool = False) -> int:
     # Market analysis (Phase 5): the gateway is optional — the page shows an
     # offline empty state until the user connects (Settings → Connect, or
     # the Phase 6 auto-connect with saved credentials).
-    market_service, shared_gateway = _build_market_service(bus)
+    market_service, shared_gateway, watchdog = _build_market_service(bus)
 
     def _reset_market_on_disconnect(state: str, _detail: str) -> None:
         # A reconnect may land on a different broker account with different
@@ -576,10 +601,16 @@ def run_gui(debug: bool = False) -> int:
 
     exit_code = qt_app.exec()
 
-    if storage is not None:
-        storage.audit.app_stopped(__version__)
-        storage.close()
-    shutdown_logging()
+    try:
+        if storage is not None:
+            with contextlib.suppress(Exception):
+                storage.audit.app_stopped(__version__)
+            storage.close()
+    finally:
+        with contextlib.suppress(Exception):
+            if watchdog is not None:
+                watchdog.stop()
+        shutdown_logging()
     return exit_code
 
 

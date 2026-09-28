@@ -29,6 +29,14 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
+; PyInstaller output file names (especially under _internal) change between
+; releases; [Files] alone only OVERWRITES, so stale DLLs/pyds from the old
+; version would survive the upgrade and produce "works portable, broken
+; after installer upgrade" mixed-version installs. Clear the tree first.
+[InstallDelete]
+Type: filesandordirs; Name: "{app}\_internal"
+Type: files; Name: "{app}\MT5TradingWorkstation.exe"
+
 [Files]
 Source: "..\dist\MT5TradingWorkstation\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 

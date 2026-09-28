@@ -158,7 +158,7 @@ class MarketAnalysisService:
         self.clock = self.manager.clock
         self.spread_monitor = SpreadMonitor()
         self.sessions = SessionClock(DEFAULT_SESSIONS)
-        self._card_builder = CardBuilder()
+        self._card_builder = CardBuilder(spread_monitor=self.spread_monitor)
         self.calendar = calendar_store or EventStore()
         self.calendar_poller = calendar_poller
         self._mono = monotonic_fn if callable(monotonic_fn) else time.monotonic
@@ -181,6 +181,12 @@ class MarketAnalysisService:
         # symbols whose first successful fetch batch has been announced in
         # the log this session (cleared on disconnect/invalidate)
         self._announced_ready: set[str] = set()
+        # recent sanity issues per symbol (bounded, newest last) feeding the
+        # evaluable() gate and the card's data_issues
+        self._recent_issues: dict[str, list[SanityIssue]] = {}
+        # newest H1 ATR per symbol — the scanner scores proximity in H1-ATR
+        # units, consistent with the card's distance_atr
+        self._atr_h1: dict[str, float] = {}
 
     # -- public API ---------------------------------------------------------------
     @property
@@ -211,6 +217,8 @@ class MarketAnalysisService:
         self._resolved_once = False
         self._fetch_failures.clear()
         self._announced_ready.clear()
+        self._recent_issues.clear()
+        self._atr_h1.clear()
         for symbol in self._watched:
             for tf in (*ANALYSIS_TIMEFRAMES, Timeframe.W1):
                 self.manager._series.pop((symbol, tf), None)
@@ -357,6 +365,23 @@ class MarketAnalysisService:
         pending = self._pending.get(symbol)
         if pending is None:
             return False
+
+        # Mark the tick BEFORE ingesting rates: the forming-bar heuristic
+        # compares bar age against the newest tick. Ingesting first would
+        # let the still-forming bar slip into the closed series on the very
+        # first batch (no tick epoch yet) — and ingest() never revises a
+        # known bar, so a partial OHLC would be frozen forever (stale PDH/
+        # PDL/indicators). The tick sample also feeds the broker-clock
+        # offset detection used by the wall-clock fallback below.
+        if pending.tick_future is not None and pending.tick_future.done():
+            try:
+                tick: TickSnapshot = pending.tick_future.result()
+                self.manager.mark_tick(symbol, tick.time)
+                self.clock.sample(float(tick.time))
+                self._record_spread(symbol, tick)
+            except Exception as exc:
+                log.warning("analysis: tick {} failed: {}", symbol, exc)
+
         for key, future in pending.futures.items():
             if not future.done():
                 return False
@@ -370,17 +395,13 @@ class MarketAnalysisService:
                 self._note_fetch_failure(symbol, exc)
                 return False
             issues = self._ingest_closed(symbol, tf, bars, count)
+            if issues:
+                self._recent_issues.setdefault(symbol, []).extend(issues)
+                # Bounded: keep only the newest 20 issues per symbol.
+                del self._recent_issues[symbol][:-20]
             if any(i.kind == SanityIssueKind.SPIKE for i in issues):
                 log.debug("analysis: spike issues on {} {}", symbol, tf.value)
 
-        if pending.tick_future is not None and pending.tick_future.done():
-            try:
-                tick: TickSnapshot = pending.tick_future.result()
-                self.manager.mark_tick(symbol, tick.time)
-                self.clock.sample(float(tick.time))
-                self._record_spread(symbol, tick)
-            except Exception as exc:
-                log.warning("analysis: tick {} failed: {}", symbol, exc)
         if pending.info_future is not None and pending.info_future.done():
             try:
                 info: Mt5SymbolInfo = pending.info_future.result()
@@ -432,7 +453,12 @@ class MarketAnalysisService:
 
     def _maybe_forming(self, symbol: str, tf: Timeframe, newest: RateBar) -> bool:
         """Heuristic: the newest fetched bar is 'forming' when its open time
-        is not yet a full bar behind the newest tick (or the wall clock)."""
+        is not yet a full bar behind the newest tick (or the wall clock).
+
+        Wall-clock fallback (only with a detected broker offset): without it
+        the first batch of a session would treat the still-forming bar as
+        closed and freeze its partial OHLC in the series forever.
+        """
         newest_tick = 0
         for ser in self.manager._series.values():
             if ser.symbol == symbol:
@@ -440,7 +466,12 @@ class MarketAnalysisService:
         if newest_tick:
             age = newest_tick - newest.time
             return age < tf.seconds
-        return False  # no tick yet: first fetch, treat everything as closed
+        if self.clock.detected:
+            # A bar whose open is within one bar-period of "now" (or that
+            # appears to open in the future — clock skew) is still forming.
+            server_now = self.clock.to_server(self.clock.utc_now_fn())
+            return server_now - newest.time < tf.seconds
+        return False  # no tick and no offset yet: conservative, treat as closed
 
     def _record_spread(self, symbol: str, tick: TickSnapshot) -> None:
         from datetime import UTC, datetime
@@ -454,7 +485,7 @@ class MarketAnalysisService:
         self._spread_state[symbol] = (spread_points, typical, abnormal)
 
     # -- internals: analysis ---------------------------------------------------------
-    def _compute_symbol(self, symbol: str) -> None:
+    def _compute_symbol(self, symbol: str, *, force: bool = False) -> None:
         bars_by_tf: dict[Timeframe, list[RateBar]] = {}
         for tf in (*ANALYSIS_TIMEFRAMES, Timeframe.W1):
             bars_by_tf[tf] = list(self.manager.series(symbol, tf).bars)
@@ -467,7 +498,8 @@ class MarketAnalysisService:
 
         newest_time = m15[-1].time
         if (
-            self._snapshot is not None
+            not force
+            and self._snapshot is not None
             and self._last_bar_time.get(symbol) == newest_time
             and not self._pending
         ):
@@ -487,6 +519,7 @@ class MarketAnalysisService:
         structure_events = structure_mod.detect_events(swings, h1_closes)
         atr_h1 = atr_fn(h1_highs, h1_lows, h1_closes, period=14)
         atr_value = float(atr_h1[-1]) if math.isfinite(float(atr_h1[-1])) else 0.0
+        self._atr_h1[symbol] = atr_value
         sr_levels = cluster_levels(swings, atr_value) if atr_value > 0 else []
         levels: list[Level] = [
             *sr_levels,
@@ -513,7 +546,16 @@ class MarketAnalysisService:
         # calendar: next high-impact event touching this symbol's currencies
         next_event = self._next_event(symbol)
 
-        issues: list[SanityIssue] = []
+        # Data-quality gate (SPEC C2.3): a SPIKE/TIME_JUMP on the newest
+        # closed bar poisons the evaluation — keep the previous card instead
+        # of publishing garbage. Collect the real issues for the UI.
+        issues = self._recent_issues.get(symbol, [])
+        if not self.manager.evaluable(symbol, Timeframe.H1, issues):
+            log.warning("analysis: {} H1 newest bar not evaluable — keeping previous card", symbol)
+            return
+        if not self.manager.evaluable(symbol, Timeframe.D1, issues):
+            log.warning("analysis: {} D1 newest bar not evaluable — keeping previous card", symbol)
+            return
         card = self._card_builder.build(
             symbol=symbol,
             trend=trend,
@@ -549,7 +591,7 @@ class MarketAnalysisService:
             structure_events=tuple(structure_events[-3:]),
             last_close=h1_closes[-1],
             last_price=h1_closes[-1],
-            issues=(),
+            issues=tuple(str(i.kind) for i in issues[-5:]),
             broker_offset=self.clock.utc_offset_string(),
             bar_count=len(m15),
         )
@@ -582,17 +624,19 @@ class MarketAnalysisService:
         """Calendar changed → refresh cards only (cheap, no MT5 calls)."""
         for symbol in list(self._symbol_snapshots):
             if force:
-                self._compute_symbol(symbol)
+                self._compute_symbol(symbol, force=True)
 
     def _recompute_cross(self) -> None:
         """Correlation + currency strength + scanner over all symbols."""
-        daily_closes: dict[str, list[float]] = {}
+        daily_closes: dict[str, list[tuple[int, float]]] = {}
         for symbol in self._watched:
             d1_bars = list(self.manager.series(symbol, Timeframe.D1).bars)
             if len(d1_bars) >= 30:
-                daily_closes[symbol] = [b.close for b in d1_bars]
+                # (time, close) pairs — correlation aligns by timestamp
+                daily_closes[symbol] = [(b.time, b.close) for b in d1_bars]
         correlation = rolling_correlation(daily_closes) if len(daily_closes) >= 2 else None
-        strength_scores = currency_strength(daily_closes) if len(daily_closes) >= 2 else {}
+        plain_closes = {s: [close for _t, close in pairs] for s, pairs in daily_closes.items()}
+        strength_scores = currency_strength(plain_closes) if len(plain_closes) >= 2 else {}
         scan: list[ScanEntry] = []
         for symbol, snap in self._symbol_snapshots.items():
             h1_vector = snap.trend.vector(Timeframe.H1)
@@ -609,7 +653,7 @@ class MarketAnalysisService:
                     event_blocked,
                     list(snap.levels),
                     snap.last_close or 0.0,
-                    snap.volatility.atr,
+                    self._atr_h1.get(symbol, 0.0),
                 )
             )
         self._snapshot = MarketSnapshot(

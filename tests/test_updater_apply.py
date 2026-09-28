@@ -244,8 +244,12 @@ def test_run_apply_update_reports_verification_mismatch(
     monkeypatch.setattr("app.updater.apply.wait_for_exit", lambda pid, timeout_s=75.0: True)
     monkeypatch.setattr("app.updater.apply.relaunch", lambda *_a: None)
     code = run_apply_update(app_dir, staging, parent_pid=0, log_path=log_path)
-    assert code == 0  # install proceeds; the mismatch is logged, not fatal
-    assert "post-install verification mismatch" in log_path.read_text(encoding="utf-8")
+    # Fail-closed contract: the tampered staging tree is detected BEFORE
+    # the install; the app dir is untouched and staging is KEPT for retry.
+    assert code == 1
+    assert "apply FAILED" in log_path.read_text(encoding="utf-8")
+    assert (app_dir / "app.exe").read_bytes() == b"old"
+    assert staging.is_dir()
 
 
 def test_removed_list_path_derives_from_staging_name(tmp_path: pathlib.Path) -> None:

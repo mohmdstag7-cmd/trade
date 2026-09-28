@@ -17,6 +17,8 @@ import contextlib
 import pathlib
 from typing import Any
 
+from loguru import logger
+
 from app.__version__ import __version__
 from app.observability.logger import get_logger
 from app.storage.audit import AuditService
@@ -63,6 +65,8 @@ class StorageService:
         self._worker: OutboxWorker | None = None
         self._cleanup: CleanupScheduler | None = None
         self._log_sink: StorageLogSink | None = None
+        self._loguru_sink_id: int | None = None
+        self._last_integrity = True
         self._session_id: str | None = None
         self._cloud_enabled = False
 
@@ -128,15 +132,29 @@ class StorageService:
         if not self._runner.verify():
             msg = "SQLite integrity check failed"
             raise DatabaseError(msg)
+        self._last_integrity = True
         self._backup.backup_if_due()
         self._session_id = self.sessions.start(__version__)
 
         self._worker = OutboxWorker(self._db, self._mirror_sink())
         self._worker.start()
-        self._cleanup = CleanupScheduler(RetentionService(self._db))
+        self._cleanup = CleanupScheduler(
+            RetentionService(self._db),
+            on_cycle=self.refresh_integrity,  # off-thread integrity refresh
+        )
         self._cleanup.start()
         self._log_sink = StorageLogSink(self._db)
         self._log_sink.start()
+        # Wire the sink into loguru: without this, ``__call__`` is never
+        # invoked and app_logs stays empty in production (tests wire the
+        # sink manually, which is why CI never noticed).
+        self._loguru_sink_id = logger.add(
+            self._log_sink,
+            level="WARNING",
+            filter=lambda record: record["extra"].get("category") != "sync",
+            enqueue=False,
+            catch=False,
+        )
         log.info(
             "storage: ready (db={}, cloud={})",
             self._db.path.name,
@@ -148,6 +166,10 @@ class StorageService:
         if self._session_id is not None:
             with contextlib.suppress(DatabaseError):  # shutdown is best effort
                 self.sessions.end(self._session_id)
+        if self._loguru_sink_id is not None:
+            with contextlib.suppress(Exception):
+                logger.remove(self._loguru_sink_id)
+            self._loguru_sink_id = None
         if self._log_sink is not None:
             self._log_sink.stop()
         if self._cleanup is not None:
@@ -192,9 +214,17 @@ class StorageService:
         return self._cloud_enabled
 
     def apply_cloud_config(self) -> bool:
-        """Re-evaluate credentials and (re)build the worker accordingly."""
-        if self._worker is not None:
-            self._worker.stop()
+        """Re-evaluate credentials and (re)build the worker accordingly.
+
+        The old worker is stopped WITHOUT an unbounded join: ``stop()``
+        can block up to 5 s while a push is in flight, and this method is
+        called from the UI thread (Save / Remove key). The stopped worker
+        is left to the daemon-thread reaper; upsert idempotency makes a
+        still-draining push harmless.
+        """
+        old_worker = self._worker
+        if old_worker is not None:
+            old_worker.stop(timeout_s=0.0)  # signal only — never join here
         self._worker = OutboxWorker(self._db, self._mirror_sink())
         self._worker.start()
         return self._cloud_enabled
@@ -209,8 +239,17 @@ class StorageService:
             return {"running": False, "enabled": self._cloud_enabled}
         return self._worker.snapshot(enabled=self._cloud_enabled).to_dict()
 
-    def stats(self) -> dict[str, Any]:
-        """Compact overview for ``--db-check`` and the Settings page."""
+    def refresh_integrity(self) -> None:
+        """Re-run PRAGMA integrity_check (call from a worker thread)."""
+        self._last_integrity = self._db.integrity_ok()
+
+    def stats(self, *, integrity: bool = False) -> dict[str, Any]:
+        """Compact overview for ``--db-check`` and the Settings page.
+
+        ``integrity`` runs ``PRAGMA integrity_check`` — an O(DB-size)
+        full scan that must NOT run on the UI thread's 2 s poll (the
+        Settings card shows the result of the LAST scheduled check).
+        """
         counts = {
             t: self._db.row_count(t)
             for t in ("signals", "trades", "audit_log", "app_logs", "health_checks")
@@ -220,7 +259,7 @@ class StorageService:
             "path": str(self._db.path),
             "size_bytes": self._db.size_bytes(),
             "wal_size_bytes": self._db.wal_size_bytes(),
-            "integrity_ok": self._db.integrity_ok(),
+            "integrity_ok": self._db.integrity_ok() if integrity else self._last_integrity,
             "cloud_enabled": self._cloud_enabled,
             "outbox": self._outbox_repo.counts(),
             "rows": counts,

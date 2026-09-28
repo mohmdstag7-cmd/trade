@@ -46,6 +46,7 @@ class CommandPalette(QDialog):
 
         self._translator = translator
         self._commands: tuple[Command, ...] = ()
+        self.setWindowFlag(Qt.WindowType.Popup, True)  # auto-close on focus loss
 
         shadow = QGraphicsDropShadowEffect(self)
         shadow.setBlurRadius(28)

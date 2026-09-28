@@ -30,9 +30,6 @@ from app.ui.theme.tokens import (
 )
 
 _QSS_TEMPLATE = """
-* {{
-  outline: none;
-}}
 QWidget {{
   background: {t.bg};
   color: {t.text};
@@ -705,9 +702,15 @@ QMenu::separator {{
 """
 
 
-def build_qss(tokens: ThemeTokens) -> str:
-    """Generate the full application stylesheet for ``tokens``."""
-    return _QSS_TEMPLATE.format(
+def build_qss(tokens: ThemeTokens, *, rtl: bool = False) -> str:
+    """Generate the full application stylesheet for ``tokens``.
+
+    With ``rtl=True`` the physical border sides are mirrored (QSS
+    ``border-left/right`` do not flip automatically under RTL layout):
+    the sidebar separator and the active-nav accent bar stay on the
+    *leading* edge, matching the flipped layout direction.
+    """
+    qss = _QSS_TEMPLATE.format(
         t=tokens,
         h1=FONT_SIZE_H1,
         h2=FONT_SIZE_H2,
@@ -719,3 +722,9 @@ def build_qss(tokens: ThemeTokens) -> str:
         radius_lg=RADIUS_LG,
         mono=MONO_FONT_STACK,
     )
+    if not rtl:
+        return qss
+    qss = qss.replace("border-left", "border-__TMP__").replace("border-right", "border-left")
+    qss = qss.replace("border-__TMP__", "border-right")
+    qss = qss.replace("left: 12px", "right: 12px")  # QGroupBox title inset
+    return qss

@@ -74,9 +74,11 @@ class LogsPage(QWidget):
         self._open_btn.clicked.connect(self._open_logs_folder)
         self._refresh_btn.clicked.connect(self.refresh)
 
-        toolbar.addWidget(QLabel(translator.translate("logs.filter.level")))
+        self._level_label = QLabel(translator.translate("logs.filter.level"))
+        self._category_label = QLabel(translator.translate("logs.filter.category"))
+        toolbar.addWidget(self._level_label)
         toolbar.addWidget(self._level_combo)
-        toolbar.addWidget(QLabel(translator.translate("logs.filter.category")))
+        toolbar.addWidget(self._category_label)
         toolbar.addWidget(self._category_combo)
         toolbar.addWidget(self._search, 1)
         toolbar.addWidget(self._auto_refresh)
@@ -114,7 +116,7 @@ class LogsPage(QWidget):
         # -- timer ------------------------------------------------------------
         self._timer = QTimer(self)
         self._timer.setInterval(self.REFRESH_MS)
-        self._timer.timeout.connect(self.refresh)
+        self._timer.timeout.connect(self._on_timer_tick)
         if self._auto_refresh.isChecked():
             self._timer.start()
 
@@ -130,8 +132,28 @@ class LogsPage(QWidget):
         self.refresh()
 
     def refresh(self) -> None:
-        """Re-render the view from the ring with the active filters."""
-        self._view.setPlainText(self._filtered_text())
+        """Re-render the view from the ring with the active filters.
+
+        The scroll position is preserved (sticking to the bottom when the
+        user is already there) — a full setPlainText used to yank the view
+        to the top every second, making live-following unreadable.
+        """
+        bar = self._view.verticalScrollBar()
+        at_bottom = bar.value() >= bar.maximum() - 4
+        new_text = self._filtered_text()
+        if new_text == self._view.toPlainText():
+            return
+        bar_value = bar.value()
+        self._view.setPlainText(new_text)
+        if at_bottom:
+            bar.setValue(bar.maximum())
+        else:
+            bar.setValue(bar_value)
+
+    def _on_timer_tick(self) -> None:
+        """Timer-driven refresh: skip while the page is hidden."""
+        if self.isVisible():
+            self.refresh()
 
     # -- internals ----------------------------------------------------------------
     def _filtered_text(self) -> str:
@@ -173,6 +195,8 @@ class LogsPage(QWidget):
         self._auto_refresh.setText(self._translator.translate("logs.autorefresh"))
         self._refresh_btn.setText(self._translator.translate("logs.refresh"))
         self._open_btn.setText(self._translator.translate("logs.open_folder"))
+        self._level_label.setText(self._translator.translate("logs.filter.level"))
+        self._category_label.setText(self._translator.translate("logs.filter.category"))
         all_index = self._level_combo.findData("")
         if all_index >= 0:
             self._level_combo.setItemText(all_index, self._translator.translate("logs.filter.all"))

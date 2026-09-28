@@ -16,6 +16,10 @@ class CalendarImporter:
     def __init__(self, store: EventStore) -> None:
         self._store = store
 
+    @property
+    def store(self) -> EventStore:
+        return self._store
+
     def import_text(self, text: str) -> tuple[int, list[str]]:
         """Merge events from CSV text; returns (added, errors)."""
         from app.calendar.events import parse_csv
@@ -57,10 +61,21 @@ class ExporterFilePoller:
             return 0, []  # no exporter file yet — normal until EA is attached
         if self._last_mtime is not None and mtime == self._last_mtime:
             return 0, []
-        self._last_mtime = mtime
         added, errors = self._importer.import_file(self._csv_path)
+        # Record the mtime only AFTER a successful read: a torn read (EA
+        # mid-write) must be retried on the next poll, not skipped.
+        self._last_mtime = mtime
         if added:
             log.info("calendar: {} event(s) imported from exporter", added)
         for err in errors:
             log.warning("calendar: exporter row problem: {}", err)
+        # Persist the merged events — previously save() was never called
+        # and every imported event evaporated on restart.
+        if added and hasattr(self._importer, "store"):
+            store = self._importer.store
+            if store is not None and hasattr(store, "save"):
+                try:
+                    store.save()
+                except OSError:
+                    log.opt(exception=True).warning("calendar: persisting store failed")
         return added, errors

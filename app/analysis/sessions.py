@@ -48,13 +48,21 @@ class SessionClock:
         self._windows = dict(windows or DEFAULT_SESSIONS)
 
     def _session_at(self, hour: int) -> str | None:
+        # Deterministic priority: the window that started most recently in
+        # wall-clock time wins, so the London/NY overlap reports NY (which
+        # opened at 12, after London's 8). Wrapped windows count their
+        # start relative to the current hour (22:00 wrap ≡ -2 at hour 3).
+        best: tuple[int, str] | None = None
         for name, (start, end) in self._windows.items():
             if start < end:
-                if start <= hour < end:
-                    return name
-            elif hour >= start or hour < end:
-                return name
-        return None
+                matches = start <= hour < end
+                effective_start = start
+            else:
+                matches = hour >= start or hour < end
+                effective_start = start - 24 if hour < start else start
+            if matches and (best is None or effective_start > best[0]):
+                best = (effective_start, name)
+        return best[1] if best else None
 
     def state(self, server_epoch: int) -> SessionState:
         hour = _hour_of(server_epoch)

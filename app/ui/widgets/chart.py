@@ -135,6 +135,14 @@ class PriceChart(pg.GraphicsLayoutWidget):
         self._last_price_line.setZValue(10)
         self._price_plot.addItem(self._last_price_line)
         self._volume_bars: pg.BarGraphItem | None = None
+        # Auto-range only until the user pans/zooms manually — a blind
+        # autoRange() on every refresh threw away their viewport each minute.
+        self._user_ranged = False
+        for plot in (self._price_plot, self._volume_plot):
+            plot.getViewBox().sigRangeChangedManually.connect(self._on_manual_range)
+
+    def _on_manual_range(self, *args: object) -> None:
+        self._user_ranged = True
 
     # -- data -------------------------------------------------------------------
     def set_data(self, bars: list[RateBar]) -> None:
@@ -158,8 +166,9 @@ class PriceChart(pg.GraphicsLayoutWidget):
                 brushes=brushes,
             )
             self._volume_plot.addItem(self._volume_bars)
-            self._price_plot.autoRange()
-            self._volume_plot.autoRange()
+            if not self._user_ranged:
+                self._price_plot.autoRange()
+                self._volume_plot.autoRange()
         else:
             self._last_price_line.hide()
 

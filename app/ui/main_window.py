@@ -194,8 +194,32 @@ class MainWindow(QMainWindow):
         qs.sync()
 
     def closeEvent(self, event: Any) -> None:
-        """Persist window geometry before closing."""
+        """Persist geometry and stop/await owned QThread workers.
+
+        Quitting while a parentless QThread runs would abort with
+        "QThread destroyed while running" (qFatal) — the connect worker
+        alone can wait up to 90 s on a cold terminal start.
+        """
         self._persist_window()
+        settings_page = self._pages.get("settings")
+        if settings_page is not None:
+            for attr in ("_connect_worker", "_update_worker", "_elevation_worker"):
+                worker = getattr(settings_page, attr, None)
+                if worker is not None:
+                    try:
+                        worker.quit()
+                        worker.wait(3000)
+                    except RuntimeError:
+                        pass  # already gone
+                setattr(settings_page, attr, None)
+        startup_worker = getattr(self, "_startup_update_worker", None)
+        if startup_worker is not None:
+            try:
+                startup_worker.quit()
+                startup_worker.wait(3000)
+            except RuntimeError:
+                pass
+            self._startup_update_worker = None
         super().closeEvent(event)
 
     # -- internals ---------------------------------------------------------------
@@ -256,7 +280,13 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(self._translator.translate("app.title"))
         app = QApplication.instance()
         if isinstance(app, QApplication):
-            app.setLayoutDirection(self._translator.layout_direction())
+            direction = self._translator.layout_direction()
+            app.setLayoutDirection(direction)
+            # Regenerate QSS so physical border sides mirror under RTL.
+            self._theme_manager.apply(rtl=direction == Qt.LayoutDirection.RightToLeft)
+            # The window title updates above, but the platform display name
+            # (taskbar grouping) kept the previous language all session.
+            app.setApplicationDisplayName(self._translator.translate("app.title"))
 
     def _quit(self) -> None:
         self.close()

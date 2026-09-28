@@ -21,6 +21,7 @@ class SpreadMonitor:
 
     abnormal_factor: float = ABNORMAL_FACTOR
     _history: dict[tuple[str, int], list[float]] = field(default_factory=dict)
+    _latest_abnormal: dict[str, bool] = field(default_factory=dict)
 
     def update(self, symbol: str, hour_utc: int, spread_points: float) -> bool:
         """Record one spread sample; returns True when it looks abnormal."""
@@ -29,7 +30,13 @@ class SpreadMonitor:
         bucket.append(spread_points)
         if len(bucket) > BUCKET_SIZE:
             del bucket[0]
-        return self.is_abnormal(symbol, hour_utc, spread_points)
+        abnormal = self.is_abnormal(symbol, hour_utc, spread_points)
+        self._latest_abnormal[symbol] = abnormal
+        return abnormal
+
+    def latest_abnormal(self, symbol: str) -> bool:
+        """Whether the newest recorded sample for ``symbol`` was abnormal."""
+        return self._latest_abnormal.get(symbol, False)
 
     def typical(self, symbol: str, hour_utc: int) -> float | None:
         """Median spread for this (symbol, hour) — None before enough data."""

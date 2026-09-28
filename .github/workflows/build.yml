@@ -12,6 +12,7 @@ jobs:
   build:
     name: PyInstaller build (windows)
     runs-on: windows-latest
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4

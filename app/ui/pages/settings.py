@@ -309,7 +309,10 @@ class SettingsPage(QWidget):
             self._storage_timer = QTimer(self)
             self._storage_timer.setInterval(_STORAGE_POLL_MS)
             self._storage_timer.timeout.connect(self._refresh_storage_stats)
-            self._storage_timer.start()
+            # Started on showEvent, stopped on hideEvent: polling stats
+            # (COUNT(*) on five tables) every 2 s for the whole session —
+            # even while the page is hidden — needlessly burns the UI
+            # thread and the DB.
             self._load_cloud_into_form()
 
         self._load_account_into_form()
@@ -364,6 +367,17 @@ class SettingsPage(QWidget):
     def _tr(self, key: str, **params: Any) -> str:
         return self._translator.translate(key, **params)
 
+    def showEvent(self, event: Any) -> None:
+        super().showEvent(event)
+        if self._storage_timer is not None and self._storage is not None:
+            self._refresh_storage_stats()  # immediate refresh on open
+            self._storage_timer.start()
+
+    def hideEvent(self, event: Any) -> None:
+        super().hideEvent(event)
+        if self._storage_timer is not None:
+            self._storage_timer.stop()
+
     def _on_startup_check_toggled(self, checked: bool) -> None:
         save_check_updates(checked)
 
@@ -372,7 +386,7 @@ class SettingsPage(QWidget):
             return
         self._update_check_button.setEnabled(False)
         self._update_status_label.setText(self._tr("updates.checking"))
-        self._update_worker = UpdateWorker(self._updater, "update")
+        self._update_worker = UpdateWorker(self._updater, "update", parent=self)
         self._update_worker.check_finished.connect(self._on_update_check_done)
         self._update_worker.progress.connect(self._on_update_progress)
         self._update_worker.stage_finished.connect(self._on_update_staged)
@@ -386,11 +400,13 @@ class SettingsPage(QWidget):
                 tr("updates.failed", error=_friendly_update_error(shown, tr))
             )
             self._update_check_button.setEnabled(True)
+            self._update_worker = None  # failed checks never reach staging
             return
         assert isinstance(result, CheckResult)
         if not result.available:
             self._update_status_label.setText(tr("updates.up_to_date", version=__version__))
             self._update_check_button.setEnabled(True)
+            self._update_worker = None  # "up to date" never reaches staging
 
     def _on_update_progress(self, done: int, total: object) -> None:
         self._update_progress.setVisible(True)
@@ -459,8 +475,8 @@ class SettingsPage(QWidget):
                 # Rare: a relocated install without write access — the
                 # helper itself needs elevation. Report the outcome before
                 # quitting; a declined UAC prompt must be visible.
-                self._elevation_worker = ElevateWorker(command)
-                self._elevation_worker.started.connect(self._on_elevation_started)
+                self._elevation_worker = ElevateWorker(command, parent=self)
+                self._elevation_worker.start_result.connect(self._on_elevation_started)
                 self._elevation_worker.start()
                 self._update_status_label.setText(
                     self._tr("updates.elevated", version=self._staged_version)
@@ -593,9 +609,11 @@ class SettingsPage(QWidget):
         self._connect_button.setEnabled(False)
         if mode == "connect":
             self._result_label.setText(tr("connect.connecting"))
-            self._connect_worker = ConnectWorker(self._shared_gateway, request)
+            self._connect_worker = ConnectWorker(self._shared_gateway, request, parent=self)
         else:
-            self._connect_worker = ConnectWorker(self._shared_gateway, None, mode="disconnect")
+            self._connect_worker = ConnectWorker(
+                self._shared_gateway, None, mode="disconnect", parent=self
+            )
         self._connect_worker.result_ready.connect(self._on_connect_result)
         self._connect_worker.start()
 
@@ -603,8 +621,9 @@ class SettingsPage(QWidget):
         tr = self._translator.translate
         worker, self._connect_worker = self._connect_worker, None
         if worker is not None:
-            worker.wait()
-            worker.deleteLater()
+            # finished→deleteLater, NOT wait(): wait() can block the UI
+            # thread on a thread that just finished a 90 s-timeout call.
+            worker.finished.connect(worker.deleteLater)
         self._connect_button.setEnabled(True)
         if ok:
             self._result_label.setText(tr("connect.done"))

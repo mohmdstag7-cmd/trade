@@ -26,11 +26,12 @@ module imports the MetaTrader5 package.
 
 from __future__ import annotations
 
+import contextlib
 import queue
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import Future
+from concurrent.futures import Future, InvalidStateError
 from typing import Any
 
 from app.mt5.errors import (
@@ -40,8 +41,10 @@ from app.mt5.errors import (
     AuthError,
     ConnectionLostError,
     GatewayTimeoutError,
+    InvalidSymbolError,
     MT5Error,
     TerminalError,
+    raise_for_check_result,
     raise_for_order_result,
 )
 from app.mt5.models import (
@@ -49,6 +52,7 @@ from app.mt5.models import (
     ConnectionState,
     ConnectRequest,
     DealSnapshot,
+    FillingConstants,
     GatewayStats,
     OrderResultSnapshot,
     PositionSnapshot,
@@ -104,6 +108,7 @@ class MT5Gateway:
 
         self._queue: queue.Queue[tuple[str, Callable[[], Any], Future[Any]] | None] = queue.Queue()
         self._stop_event = threading.Event()
+        self._worker_exited = threading.Event()
         self._thread: threading.Thread | None = None
 
         self._state = ConnectionState.DISCONNECTED
@@ -124,6 +129,7 @@ class MT5Gateway:
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop_event.clear()
+        self._worker_exited.clear()
         self._thread = threading.Thread(target=self._run, name="mt5-gateway", daemon=True)
         self._thread.start()
         log.info("gateway[{}]: started", self._name)
@@ -164,8 +170,13 @@ class MT5Gateway:
         return self._submit("connect", lambda: self._establish(request))
 
     def disconnect(self) -> Future[None]:
-        """Close the terminal session and return to DISCONNECTED."""
-        return self._submit("disconnect", self._teardown_session)
+        """Close the terminal session and return to DISCONNECTED.
+
+        Works in every state — including RECONNECTING, where it cancels
+        the pending reconnection instead of failing fast (a user who
+        closes the session must always be able to stop the loop).
+        """
+        return self._submit("disconnect", self._teardown_session, bypass_reconnect_guard=True)
 
     def account_info(self) -> Future[AccountSnapshot]:
         """Fetch the current account snapshot."""
@@ -193,10 +204,7 @@ class MT5Gateway:
 
     def select_symbol(self, symbol: str) -> Future[bool]:
         """Make a symbol visible in Market Watch (required before quoting)."""
-        return self._submit(
-            "select_symbol",
-            lambda: self._require(bool(self._module.symbol_select(symbol, True)), "symbol_select"),
-        )
+        return self._submit("select_symbol", lambda: self._select_symbol(symbol))
 
     def rates_from_pos(
         self, symbol: str, timeframe: str, start_pos: int, count: int
@@ -224,6 +232,14 @@ class MT5Gateway:
         """Send one trade request dict (low-level primitive for Phase 7+)."""
         return self._submit("order_send", lambda: self._send_order(request))
 
+    def filling_constants(self) -> Future[FillingConstants]:
+        """Capture the module's order/ filling constants on the worker thread.
+
+        Lets CLI tools (demo trade test) build request dicts without
+        touching the private module from a foreign thread.
+        """
+        return self._submit("filling_constants", self._capture_filling_constants)
+
     def ping(self) -> Future[float]:
         """Round-trip latency of a terminal_info() call, in milliseconds."""
         return self._submit("ping", self._ping)
@@ -249,20 +265,23 @@ class MT5Gateway:
         self, future: Future[Any], operation: str, timeout_s: float | None = None
     ) -> Any:
         """Blocking wait helper for CLI code (never use on the UI thread)."""
+        effective = self._request_timeout_s if timeout_s is None else timeout_s
         try:
-            return future.result(timeout=timeout_s or self._request_timeout_s)
+            return future.result(timeout=effective)
         except TimeoutError as exc:
-            raise GatewayTimeoutError(operation, timeout_s or self._request_timeout_s) from exc
+            raise GatewayTimeoutError(operation, effective) from exc
 
     # ------------------------------------------------------------------ #
     # internals — worker thread only from here on                          #
     # ------------------------------------------------------------------ #
-    def _submit(self, operation: str, fn: Callable[[], Any]) -> Future[Any]:
+    def _submit(
+        self, operation: str, fn: Callable[[], Any], *, bypass_reconnect_guard: bool = False
+    ) -> Future[Any]:
         future: Future[Any] = Future()
-        if self._stop_event.is_set():
+        if self._stop_event.is_set() or self._worker_exited.is_set():
             future.set_exception(MT5Error(code=0, description="gateway is stopped"))
             return future
-        if self._state is ConnectionState.RECONNECTING:
+        if self._state is ConnectionState.RECONNECTING and not bypass_reconnect_guard:
             # Fail fast instead of queueing behind an unknown backoff delay.
             future.set_exception(
                 ConnectionLostError(
@@ -272,25 +291,66 @@ class MT5Gateway:
             )
             return future
         self._queue.put((operation, fn, future))
+        if self._worker_exited.is_set():
+            # Raced the worker's final drain — the queued item will never
+            # run; fail the future here so the caller never hangs.
+            with contextlib.suppress(InvalidStateError):  # drain beat us to it
+                future.set_exception(MT5Error(code=0, description="gateway is stopped"))
         return future
 
     def _run(self) -> None:
         while not self._stop_event.is_set():
-            self._beat()
-            if self._state is ConnectionState.RECONNECTING:
-                self._poll_reconnect()
-                continue
             try:
-                item = self._queue.get(timeout=_IDLE_POLL_S)
-            except queue.Empty:
-                continue
-            if item is None:
-                break
-            operation, fn, future = item
-            self._execute(operation, fn, future)
+                self._beat()
+                if self._state is ConnectionState.RECONNECTING:
+                    # While reconnecting, only control commands are
+                    # meaningful: execute a queued disconnect (cancels the
+                    # loop) and fail everything else queued before the
+                    # outage instead of letting futures hang forever.
+                    self._drain_while_reconnecting()
+                    if self._state is not ConnectionState.RECONNECTING:
+                        continue
+                    self._poll_reconnect()
+                    continue
+                try:
+                    item = self._queue.get(timeout=_IDLE_POLL_S)
+                except queue.Empty:
+                    continue
+                if item is None:
+                    break
+                operation, fn, future = item
+                self._execute(operation, fn, future)
+            except Exception:
+                # Umbrella guard: one unexpected exception must never kill
+                # the worker silently (state would stay stuck, queued
+                # futures would never resolve, nothing would notice).
+                log.opt(exception=True).critical(
+                    "gateway[{}]: worker loop error — recovering", self._name
+                )
         self._drain_queue()
+        self._worker_exited.set()
         self._teardown_session()
         log.debug("gateway[{}]: worker exited", self._name)
+
+    def _drain_while_reconnecting(self) -> None:
+        """Handle queued commands while RECONNECTING (worker thread only)."""
+        while self._state is ConnectionState.RECONNECTING and not self._stop_event.is_set():
+            try:
+                item = self._queue.get_nowait()
+            except queue.Empty:
+                return
+            if item is None:
+                continue
+            operation, fn, future = item
+            if operation == "disconnect":
+                self._execute(operation, fn, future)
+            elif not future.done():
+                future.set_exception(
+                    ConnectionLostError(
+                        RETCODE_CONNECTION,
+                        "gateway is reconnecting — command dropped",
+                    )
+                )
 
     def _drain_queue(self) -> None:
         while True:
@@ -367,9 +427,13 @@ class MT5Gateway:
     def _establish(self, request: ConnectRequest) -> AccountSnapshot:
         """initialize + login + verify. Runs on the worker thread."""
         module = self._module_or_fail()
+        try:
+            requested_login = int(request.login)
+        except (TypeError, ValueError) as exc:
+            raise MT5Error(code=0, description=f"invalid login {request.login!r}") from exc
         self._set_state(ConnectionState.CONNECTING)
         kwargs: dict[str, Any] = {
-            "login": int(request.login),
+            "login": requested_login,
             "password": request.password,
             "server": request.server,
         }
@@ -380,6 +444,9 @@ class MT5Gateway:
             ok = bool(module.initialize(**kwargs))
             if not ok:
                 code, description = module.last_error()
+                # Release whatever half-open IPC state initialize() left.
+                with contextlib.suppress(Exception):
+                    module.shutdown()
                 self._set_state(ConnectionState.DISCONNECTED)
                 raise _terminal_exception(int(code), str(description or ""))
             account_raw = module.account_info()
@@ -388,6 +455,7 @@ class MT5Gateway:
                 module.shutdown()
                 self._set_state(ConnectionState.DISCONNECTED)
                 raise _terminal_exception(int(code), str(description or ""))
+            snapshot = _to_account_snapshot(account_raw)
         except ConnectionLostError:
             raise
         except MT5Error:
@@ -396,7 +464,19 @@ class MT5Gateway:
             self._set_state(ConnectionState.DISCONNECTED)
             raise MT5Error(code=0, description=f"terminal connection failed: {exc}") from exc
 
-        snapshot = _to_account_snapshot(account_raw)
+        if snapshot.login != requested_login:
+            # The terminal was already logged into a DIFFERENT account than
+            # the one requested — a silent account mismatch would corrupt
+            # every downstream trade/history decision.
+            module.shutdown()
+            self._set_state(ConnectionState.DISCONNECTED)
+            raise MT5Error(
+                code=0,
+                description=(
+                    f"terminal logged into account ***{str(snapshot.login)[-3:]} "
+                    f"instead of requested ***{str(requested_login)[-3:]}"
+                ),
+            )
         self._request = request
         self._account = snapshot
         self._reconnect_delay_s = self._reconnect_initial_s
@@ -443,6 +523,12 @@ class MT5Gateway:
         log.warning("gateway[{}]: connection lost ({}), reconnecting…", self._name, exc)
 
     def _poll_reconnect(self) -> None:
+        request = self._request
+        if request is None:
+            # Nothing to re-establish (never connected, or a queued
+            # disconnect already cancelled the loop).
+            self._teardown_session()
+            return
         now = self._time_fn()
         if now < self._next_reconnect_at:
             remaining = min(self._next_reconnect_at - now, _IDLE_POLL_S)
@@ -450,13 +536,17 @@ class MT5Gateway:
                 return
             self._beat()
             return
-        request = self._request
-        if request is None:
-            self._teardown_session()
-            return
         try:
             self._stats.reconnects += 1  # counts every reconnect attempt
             self._establish(request)
+        except AuthError as exc:
+            # Permanent failure (wrong password / changed credentials):
+            # retrying every 30 s cannot succeed and would lock the
+            # account. Give up; the user must reconnect manually.
+            log.error(
+                "gateway[{}]: reconnect aborted — permanent auth failure ({})", self._name, exc
+            )
+            self._teardown_session()
         except MT5Error as exc:
             self._reconnect_delay_s = min(
                 self._reconnect_delay_s * self._reconnect_factor,
@@ -468,6 +558,21 @@ class MT5Gateway:
             self._set_state(ConnectionState.RECONNECTING)
             log.warning(
                 "gateway[{}]: reconnect attempt failed ({}) — next try in {:.1f}s",
+                self._name,
+                exc,
+                self._reconnect_delay_s,
+            )
+        except Exception as exc:
+            # Unexpected (non-MT5Error) failure — treat as retryable so the
+            # umbrella loop guard above is never the only line of defense.
+            self._reconnect_delay_s = min(
+                self._reconnect_delay_s * self._reconnect_factor,
+                self._reconnect_max_s,
+            )
+            self._next_reconnect_at = self._time_fn() + self._reconnect_delay_s
+            self._set_state(ConnectionState.RECONNECTING)
+            log.opt(exception=True).warning(
+                "gateway[{}]: reconnect crashed ({}) — next try in {:.1f}s",
                 self._name,
                 exc,
                 self._reconnect_delay_s,
@@ -508,7 +613,19 @@ class MT5Gateway:
         self._require_connected("symbol_info")
         raw = self._module.symbol_info(symbol)
         if raw is None:
-            raise TerminalError(0, f"symbol not found on this broker: {symbol}")
+            # ``symbol_info`` returns None BOTH for unknown symbols and for
+            # IPC/terminal failures — consult last_error() and map disconnect
+            # codes so a mid-session drop enters the reconnect path instead
+            # of being misreported as a data problem.
+            code, description = self._last_error()
+            if code in (RETCODE_CONNECTION, TERMINAL_CODE_CONNECT_FAILED, TERMINAL_CODE_NO_IPC):
+                raise ConnectionLostError(code, description or f"symbol_info failed: {symbol}")
+            raise InvalidSymbolError(
+                symbol,
+                code=code,  # keep 0/unmapped so friendly_message() falls
+                # back to the description instead of a generic table entry
+                description=description,
+            )
         return _to_symbol_snapshot(raw)
 
     def _fetch_tick(self, symbol: str) -> TickSnapshot:
@@ -528,7 +645,9 @@ class MT5Gateway:
         if result is None:
             code, description = self._last_error()
             raise TerminalError(code or -1, description or "order_check returned nothing")
-        raise_for_order_result(result, self._module)
+        # order_check mirrors MqlTradeCheckResult — success is commonly
+        # retcode 0, not the TRADE_RETCODE_* values order_send returns.
+        raise_for_check_result(result, self._module)
         return _to_order_result_snapshot(result)
 
     def _fetch_rates(
@@ -598,6 +717,23 @@ class MT5Gateway:
                 RETCODE_CONNECTION,
                 f"{operation} requested while {self._state.value}",
             )
+
+    def _select_symbol(self, symbol: str) -> bool:
+        """Worker-side select with the standard connected-state contract."""
+        self._require_connected("select_symbol")
+        selected = self._require(bool(self._module.symbol_select(symbol, True)), "symbol_select")
+        return bool(selected)
+
+    def _capture_filling_constants(self) -> FillingConstants:
+        """Snapshot the module's order constants (worker thread only)."""
+        module = self._module_or_fail()
+        return FillingConstants(
+            trade_action_deal=int(getattr(module, "TRADE_ACTION_DEAL", 1)),
+            order_time_gtc=int(getattr(module, "ORDER_TIME_GTC", 0)),
+            order_filling_fok=int(getattr(module, "ORDER_FILLING_FOK", 0)),
+            order_filling_ioc=int(getattr(module, "ORDER_FILLING_IOC", 1)),
+            order_filling_return=int(getattr(module, "ORDER_FILLING_RETURN", 2)),
+        )
 
 
 # --------------------------------------------------------------------------- #

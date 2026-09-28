@@ -16,6 +16,7 @@ import threading
 from typing import Any
 
 from app.observability.logger import get_logger
+from app.observability.masking import mask_text
 from app.storage.db import Database
 from app.storage.repositories import AppLogRepository, new_id, now_iso
 
@@ -53,6 +54,7 @@ class StorageLogSink:
         flush_interval_s: float = 5.0,
         max_buffer: int = 500,
     ) -> None:
+        self._db = db
         self._repo = AppLogRepository(db)
         self._min_level = _LEVEL_ORDER.get(min_level.upper(), 30)
         self._flush_interval = flush_interval_s
@@ -74,7 +76,15 @@ class StorageLogSink:
         if level_no < self._min_level:
             return
         extra = record["extra"]
-        exception = record["exception"]
+        # The global patcher replaces raw exceptions with a pre-masked
+        # traceback (key "exception") so secrets never reach this sink —
+        # and through it, the Supabase mirror. Fall back defensively.
+        exc_masked = extra.get("exception")
+        exc_type = extra.get("exception_type")
+        if exc_masked is None and record["exception"] is not None:
+            raw = record["exception"]
+            exc_type = raw.type.__name__
+            exc_masked = mask_text(str(raw))
         row: dict[str, Any] = {
             "id": new_id(),
             "level": str(record["level"].name),
@@ -86,8 +96,8 @@ class StorageLogSink:
             "signal_id": _opt_str(extra.get("signal_id")),
             "trade_id": _opt_str(extra.get("trade_id")),
             "symbol": _opt_str(extra.get("symbol")),
-            "exception_type": (f"{exception.type.__name__}" if exception is not None else None),
-            "stack_trace": None if exception is None else str(exception)[:4000],
+            "exception_type": exc_type,
+            "stack_trace": None if exc_masked is None else str(exc_masked)[:4000],
             "created_at": now_iso(),
         }
         with self._lock:
@@ -125,5 +135,9 @@ class StorageLogSink:
             return 0
 
     def _loop(self) -> None:
-        while not self._stop.wait(self._flush_interval):
-            self.flush()
+        try:
+            while not self._stop.wait(self._flush_interval):
+                self.flush()
+        finally:
+            # sqlite connections are thread-bound: close our own on exit
+            self._db.close_thread_connection()

@@ -17,6 +17,7 @@ keys, SPEC I). Secrets never enter any repository (SPEC I-6).
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from collections.abc import Callable
 from typing import Any
@@ -79,10 +80,25 @@ def _require(row: dict[str, Any], field: str, table: str) -> None:
 class BaseRepository:
     """CRUD with automatic outbox mirroring for business tables."""
 
+    #: Defense in depth: interpolated identifiers come from code constants
+    #: today, but one stray " in a caller-supplied name must not break out
+    #: of the quoting.
+    _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
     def __init__(self, db: Database, table: str, *, mirrored: bool | None = None) -> None:
+        if not self._IDENT_RE.match(table):
+            msg = f"invalid table name: {table!r}"
+            raise ValueError(msg)
         self._db = db
         self.table = table
         self._mirrored = mirrored if mirrored is not None else table in MIRRORED_TABLES
+
+    def _q_ident(self, name: str) -> str:
+        """Validate + quote a column/identifier for interpolation."""
+        if not self._IDENT_RE.match(name):
+            msg = f"invalid identifier: {name!r}"
+            raise ValueError(msg)
+        return f'"{name}"'
 
     # -- write -----------------------------------------------------------------
     def insert(self, row: dict[str, Any], *, mirror: bool | None = None) -> str:
@@ -95,8 +111,8 @@ class BaseRepository:
 
         columns = sorted(row)
         placeholders = ", ".join("?" for _ in columns)
-        quoted = ", ".join(f'"{c}"' for c in columns)
-        sql = f'INSERT INTO "{self.table}" ({quoted}) VALUES ({placeholders})'
+        quoted = ", ".join(self._q_ident(c) for c in columns)
+        sql = f"INSERT INTO {self._q_ident(self.table)} ({quoted}) VALUES ({placeholders})"
 
         with self._db.transaction():
             self._db.execute(sql, [row[c] for c in columns])
@@ -119,7 +135,7 @@ class BaseRepository:
         if not changes:
             return True
         columns = sorted(changes)
-        assignments = ", ".join(f'"{c}" = ?' for c in columns)
+        assignments = ", ".join(f"{self._q_ident(c)} = ?" for c in columns)
         sql = f'UPDATE "{self.table}" SET {assignments} WHERE id = ?'
         with self._db.transaction():
             self._db.execute(sql, [changes[c] for c in columns] + [row_id])
@@ -146,7 +162,20 @@ class BaseRepository:
         return [dict(r) for r in rows]
 
     def delete(self, row_id: str) -> None:
-        self._db.execute(f'DELETE FROM "{self.table}" WHERE id = ?', (row_id,))
+        """Delete a row locally and cancel its pending mirror entries.
+
+        Without cancelling, a still-pending insert/update would later
+        re-upsert the deleted row — resurrecting it in the cloud forever.
+        Full tombstone propagation to Supabase is a future design task.
+        """
+        with self._db.transaction():
+            self._db.execute(f'DELETE FROM "{self.table}" WHERE id = ?', (row_id,))
+            if self._mirrored:
+                self._db.execute(
+                    "DELETE FROM outbox WHERE table_name = ? AND row_id = ? "
+                    "AND state IN ('pending', 'in_flight')",
+                    (self.table, row_id),
+                )
 
 
 class OutboxRepository:
@@ -226,7 +255,8 @@ class OutboxRepository:
 
     def last_synced_at(self) -> str | None:
         row = self._db.query_one(
-            "SELECT updated_at FROM outbox WHERE state = 'synced' ORDER BY updated_at DESC LIMIT 1"
+            "SELECT updated_at FROM outbox WHERE state = 'synced' "
+            "ORDER BY updated_at DESC, id DESC LIMIT 1"  # id tiebreaker: ms-clamped timestamps
         )
         return str(row["updated_at"]) if row else None
 

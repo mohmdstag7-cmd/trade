@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import pathlib
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -148,7 +149,18 @@ def verify_tree(
     return problems
 
 
+_SAFE_VERSION_RE = re.compile(r"^v?\d+(?:\.\d+)*(?:[-+][\w.]*)?$")
+
+
 def staging_root(app_dir: pathlib.Path, new_version: str) -> pathlib.Path:
-    """Sibling staging directory (same drive ⇒ fast moves, no recursion)."""
-    parse_version(new_version)  # validate early
+    """Sibling staging directory (same drive ⇒ fast moves, no recursion).
+
+    The RAW version string is interpolated into a directory name, so it
+    must be a strict version token: path separators or ``..`` segments
+    would turn a tampered manifest version into a path-traversal write.
+    """
+    parse_version(new_version)  # numeric sanity (suffixes allowed)
+    if not _SAFE_VERSION_RE.match(new_version):
+        msg = f"unsafe version string for staging: {new_version!r}"
+        raise ValueError(msg)
     return app_dir.parent / f"{app_dir.name}.update-{new_version}"

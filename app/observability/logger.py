@@ -200,6 +200,15 @@ def _patch_record(record: Any) -> None:
     extra["session_id"] = get_session_id() or (_state.session_id if _state else "")
     extra["trace_id"] = get_trace_id()
     record["message"] = mask_text(str(record["message"]))
+    exc = record["exception"]
+    if exc is not None:
+        # Capture a MASKED traceback and drop the raw one. Loguru would
+        # otherwise append the raw traceback to every static-format sink
+        # (all.log, console) and exception messages routinely embed secrets
+        # (URLs, connection strings) — SPEC G4 forbids that.
+        extra["exception_type"] = exc.type.__name__
+        extra["exception"] = mask_text("".join(traceback.format_exception(*exc)))
+        record["exception"] = None
     mask_extras(extra)
     if _state is not None:
         _ensure_category_sink(str(extra["category"]))
@@ -228,9 +237,9 @@ def _json_line(record: Any) -> str:
         value = extra.get(key)
         if value is not None:
             payload[key] = value
-    if record["exception"] is not None:
-        payload["exception_type"] = record["exception"].type.__name__
-        payload["exception"] = "".join(traceback.format_exception(*record["exception"]))
+    if extra.get("exception") is not None:  # pre-masked by the patcher
+        payload["exception_type"] = extra.get("exception_type", "")
+        payload["exception"] = extra["exception"]
     return json.dumps(payload, ensure_ascii=False, default=str)
 
 
@@ -313,7 +322,16 @@ def enforce_total_size_cap(logs_dir: Path, cap_mb: float) -> int:
             continue
     over = total - cap_bytes
     removed = 0
-    for path in sorted(files, key=lambda item: item.stat().st_mtime):
+
+    def _mtime(path: Path) -> float:
+        # Files can vanish between rglob() and the sort (rotation/zip
+        # worker); treat unreadable files as oldest so they prune first.
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    for path in sorted(files, key=_mtime):
         if over <= 0:
             break
         try:

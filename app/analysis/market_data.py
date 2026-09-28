@@ -172,15 +172,29 @@ class MarketDataManager:
         issues: list[SanityIssue] = []
         if new_bars:
             issues.extend(self._check_against_history(ser, new_bars, timeframe))
-            ser.bars.extend(new_bars)
+            # A TIME_JUMP bar (time not after the previous close) must NOT
+            # enter the series — appending it would leave the deque
+            # non-monotonic forever (server-clock shifts at DST). Drop it;
+            # the issue is surfaced to the caller either way.
+            jump_times = {
+                i.bar_time
+                for i in issues
+                if i.kind == SanityIssueKind.TIME_JUMP and i.timeframe == timeframe
+            }
+            monotonic = [b for b in new_bars if b.time not in jump_times]
+            last_time = ser.bars[-1].time if ser.bars else 0
+            monotonic = [b for b in monotonic if b.time > last_time]
+            dropped = len(new_bars) - len(monotonic)
+            ser.bars.extend(monotonic)
             while len(ser.bars) > self._max_bars:
                 ser.bars.popleft()
             log.debug(
-                "analysis: {} {} +{} closed bar(s) (total {})",
+                "analysis: {} {} +{} closed bar(s) (total {}){}",
                 symbol,
                 timeframe.value,
-                len(new_bars),
+                len(monotonic),
                 len(ser.bars),
+                f" — {dropped} time-jump bar(s) dropped" if dropped else "",
             )
         return issues
 

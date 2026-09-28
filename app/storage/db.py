@@ -116,12 +116,18 @@ class Database:
             yield conn
             return
         self._local.in_transaction = True
+        began = False
         try:
             conn.execute("BEGIN IMMEDIATE")
+            began = True
             yield conn
             conn.execute("COMMIT")
         except BaseException:
-            conn.execute("ROLLBACK")
+            # A failed BEGIN must not trigger a bogus ROLLBACK (which would
+            # mask the original error with "no transaction is active").
+            if began:
+                with contextlib.suppress(sqlite3.Error):
+                    conn.execute("ROLLBACK")
             raise
         finally:
             self._local.in_transaction = False
@@ -139,7 +145,15 @@ class Database:
                     self._all_conns.remove(conn)
 
     def close_all(self) -> None:
-        """Close every connection opened by any thread (shutdown path)."""
+        """Mark the database closed and best-effort close known connections.
+
+        sqlite3 connections can only be USED and CLOSED by their owning
+        thread; worker threads are expected to call
+        :meth:`close_thread_connection` on shutdown (the outbox worker,
+        log sink and cleanup scheduler do). Foreign-thread closes here
+        fail silently by design — the handles are reclaimed at process
+        exit either way.
+        """
         with self._all_conns_lock:
             conns = list(self._all_conns)
         for conn in conns:

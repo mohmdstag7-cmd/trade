@@ -11,6 +11,7 @@ jobs:
   release:
     name: Build and attach release artifacts
     runs-on: windows-latest
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -58,18 +59,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $version = $env:GITHUB_REF_NAME.TrimStart("v")
-          $prev = gh release view --repo $env:GITHUB_REPOSITORY --json tagName 2>$null | ConvertFrom-Json
-          if (-not $prev -or -not $prev.tagName) {
-            Write-Host "No previous release — skipping delta package."
+          # gh release view (no args) returns the NEWEST release, which in
+          # the release-please flow IS the current tag - so the guard below
+          # always skipped and deltas were never built. List releases and
+          # pick the newest whose tag differs from the current one.
+          $prevTag = gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=30" --jq "[.[].tag_name] | map(select(. != "v$version")) | .[0] // """ 2>$null
+          if (-not $prevTag) {
+            Write-Host "No previous release tag found - skipping delta package."
             exit 0
           }
-          $prevVersion = $prev.tagName.TrimStart("v")
-          if ($prevVersion -eq $version) {
-            Write-Host "Previous tag equals this tag — skipping delta package."
-            exit 0
-          }
+          $prevVersion = $prevTag.TrimStart("v")
           New-Item -ItemType Directory -Force -Path prev_download | Out-Null
-          gh release download $prev.tagName --repo $env:GITHUB_REPOSITORY `
+          gh release download $prevTag --repo $env:GITHUB_REPOSITORY `
             --pattern "MT5TradingWorkstation-portable.zip" --dir prev_download
           if ($LASTEXITCODE -ne 0) {
             Write-Host "Previous portable zip unavailable — skipping delta package."
@@ -87,8 +88,8 @@ jobs:
           }
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Install Inno Setup
-        run: choco install innosetup -y --no-progress
+      - name: Install Inno Setup (version pinned for reproducible builds)
+        run: choco install innosetup --version 6.4.1 -y --no-progress
 
       - name: Build installer with Inno Setup
         shell: pwsh

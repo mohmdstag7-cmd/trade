@@ -67,7 +67,7 @@ class TestStorageService:
         try:
             stats = service.stats()
             assert stats["integrity_ok"] is True
-            assert stats["version"] == 1
+            assert stats["version"] == 2  # migration 002: outbox maintenance index
             assert stats["cloud_enabled"] is False
             assert set(stats["rows"]) == {
                 "signals",
@@ -113,7 +113,7 @@ class TestDbCheckCli:
         assert run_db_check(_Args(str(data_dir))) == 0
         out = capsys.readouterr().out
         assert "Integrity: OK" in out
-        assert "Schema version: 1" in out
+        assert "Schema version: 2" in out
         assert "local-only" in out
 
     def test_db_check_json_mode(
@@ -124,7 +124,7 @@ class TestDbCheckCli:
         assert run_db_check(_Args(str(data_dir), json=True)) == 0
         payload = json.loads(capsys.readouterr().out)
         assert payload["integrity_ok"] is True
-        assert payload["version"] == 1
+        assert payload["version"] == 2
         assert payload["cloud_enabled"] is False
 
     def test_db_check_twice_is_idempotent(self, data_dir: pathlib.Path) -> None:

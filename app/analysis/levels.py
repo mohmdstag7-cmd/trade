@@ -70,10 +70,14 @@ def cluster_levels(
 
 
 def prev_day_levels(d1_bars: list[RateBar]) -> list[Level]:
-    """PDH / PDL / PDC from the last CLOSED daily bar (bars oldest->newest)."""
-    if len(d1_bars) < 2:
+    """PDH / PDL / PDC from the last CLOSED daily bar (bars oldest->newest).
+
+    The series fed here contains closed bars only (the forming day is
+    excluded at ingest), so "previous day" is the LAST bar, not ``[-2]``.
+    """
+    if not d1_bars:
         return []
-    prev = d1_bars[-2]
+    prev = d1_bars[-1]
     return [
         Level(LevelKind.PREV_DAY, "PDH", prev.high),
         Level(LevelKind.PREV_DAY, "PDL", prev.low),
@@ -82,10 +86,10 @@ def prev_day_levels(d1_bars: list[RateBar]) -> list[Level]:
 
 
 def prev_week_levels(w1_bars: list[RateBar]) -> list[Level]:
-    """PWH / PWL / PWC from the last closed weekly bar."""
-    if len(w1_bars) < 2:
+    """PWH / PWL / PWC from the last closed weekly bar (closed-only series)."""
+    if not w1_bars:
         return []
-    prev = w1_bars[-2]
+    prev = w1_bars[-1]
     return [
         Level(LevelKind.PREV_WEEK, "PWH", prev.high),
         Level(LevelKind.PREV_WEEK, "PWL", prev.low),

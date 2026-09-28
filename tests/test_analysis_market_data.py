@@ -139,7 +139,13 @@ class TestSanity:
         backwards = bar(1_000_000 + 12 * TF_SEC, 100.0)
         issues = mgr.ingest("EURUSD", TF, [backwards])
         assert SanityIssueKind.TIME_JUMP in [i.kind for i in issues]
-        assert mgr.evaluable("EURUSD", TF, issues) is False
+        # The poisoned bar is dropped before entering the series, so the
+        # newest CLOSED bar (slot 15) is untouched and stays evaluable.
+        assert mgr.evaluable("EURUSD", TF, issues) is True
+        # the jump bar is DROPPED — the closed series stays monotonic
+        times = [b.time for b in mgr.series("EURUSD", TF).bars]
+        assert times == sorted(times)
+        assert (1_000_000 + 12 * TF_SEC) not in times
 
     def test_evaluable_false_when_no_bars(self) -> None:
         mgr = MarketDataManager()

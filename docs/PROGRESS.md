@@ -489,3 +489,54 @@ MT5TradingWorkstation.exe            :: new look everywhere; resize the window �
 - [x] Release workflow publishes `manifest.json` + `delta-v*.zip` + checksums.
 - [x] The `QStyleHints` startup warning is filtered; all Qt output now flows
       into the observability layer.
+
+## Code review round 1 (branch `fix/code-review-round1`)
+
+### Scope
+
+Full-repository review (static gates + line-by-line manual review with runtime
+verification). Every finding, its severity and its fix status is tracked in
+[CODE_REVIEW.md](../CODE_REVIEW.md) — the source of truth for this round.
+
+### Highlights of what was fixed
+
+- **Analysis correctness:** the first fetch ingested the still-forming bar as
+  "closed" and froze its partial OHLC forever (stale PDH/PDL/PDC, corrupted
+  indicators). Ticks are now marked before rate ingestion, with a broker-clock
+  wall-clock fallback; `levels`/`volatility` moved to a single closed-only
+  contract; the `evaluable()` data-quality gate is wired into the pipeline.
+- **UI:** Market page timers actually start (the page used to freeze forever),
+  toasts are visible (host geometry), the trend card no longer leaks ghost
+  rows, the update-check button no longer bricks itself, workers are parented
+  and awaited at shutdown, stats polling only runs while Settings is visible.
+- **MT5 gateway:** umbrella exception guard (silent worker death), disconnect
+  during reconnection, permanent auth failures stop the reconnect loop,
+  shutdown race closed, `symbol_info`/`select_symbol` state contracts,
+  heartbeat wired to the watchdog, single-instance guard.
+- **Secrets:** masking now covers `access_token`-style keys, URL userinfo and
+  `mask_dict` prefixes; exception tracebacks are masked before reaching
+  logs/`app_logs`/the Supabase mirror; `--password-stdin` uses getpass.
+- **Storage:** outbox failures isolated per table (one bad table no longer
+  kills unrelated rows), log sink actually registered with loguru, synced
+  outbox purge + `updated_at` index (migration 002), `*_json` columns no
+  longer double-encoded into jsonb, identifier validation, thread-bound
+  connection teardown.
+- **Updater:** staging verified BEFORE install (fail-closed, keep staging),
+  removed-list path traversal closed, unmanifested staging files rejected,
+  release zips cleaned, previous-tag selection fixed so delta packages are
+  actually built, release-please token documented (needs `RELEASE_PLEASE_TOKEN`
+  secret).
+- **MQL5:** `CalendarValueHistory` bool/ArraySize bug (only ONE event was
+  exported), real-UTC timestamps (risk windows were off by the broker
+  offset), atomic temp-file publish, proper CSV quoting.
+
+### Quality gates
+
+`ruff check` / `ruff format --check` / `mypy app` / `pytest` (601 tests) all
+green on this branch.
+
+### Known deferred items
+
+See CODE_REVIEW.md §10 (code signing, cloud schema versioning, rollback on
+failed apply, MT5 Common-path resolution, dead-letter tooling, dependency
+lock file, SHA-pinning actions, `order_check` retcode on real hardware).

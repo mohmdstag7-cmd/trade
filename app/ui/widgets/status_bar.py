@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QLabel, QPushButton, QStatusBar, QWidget
 
 from app.core.clock import broker_time_string, format_local_time
@@ -71,12 +71,13 @@ class StatusBar(QStatusBar):
 
         self._theme_button = QPushButton()
         self._theme_button.setObjectName("GhostButton")
-        self._theme_button.setCursor(self.cursor())
+        self._theme_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._theme_button.clicked.connect(on_toggle_theme)
         self.addPermanentWidget(self._theme_button)
 
         self._language_button = QPushButton()
         self._language_button.setObjectName("GhostButton")
+        self._language_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._language_button.clicked.connect(on_toggle_language)
         self.addPermanentWidget(self._language_button)
 

@@ -57,24 +57,28 @@ class TestClusterLevels:
 
 
 class TestPrevLevels:
+    # Closed-only contract: the series holds CLOSED bars only, so the
+    # "previous day/week" is the LAST bar of the series.
     def test_prev_day_levels(self) -> None:
         bars = [d1_bar(4, 105, 95, 100), d1_bar(5, 110, 98, 108)]
         levels = prev_day_levels(bars)
         by_name = {lv.name: lv.price for lv in levels}
-        assert by_name["PDH"] == 105.0
-        assert by_name["PDL"] == 95.0
-        assert by_name["PDC"] == 100.0
+        assert by_name["PDH"] == 110.0
+        assert by_name["PDL"] == 98.0
+        assert by_name["PDC"] == 108.0
 
     def test_prev_week_levels(self) -> None:
         bars = [d1_bar(4, 200, 190, 195), d1_bar(5, 210, 188, 205)]
         levels = prev_week_levels(bars)
         by_name = {lv.name: lv.price for lv in levels}
-        assert by_name["PWH"] == 200.0
-        assert by_name["PWL"] == 190.0
+        assert by_name["PWH"] == 210.0
+        assert by_name["PWL"] == 188.0
 
-    def test_needs_two_bars(self) -> None:
-        assert prev_day_levels([d1_bar(4, 1, 0, 0.5)]) == []
+    def test_needs_one_closed_bar(self) -> None:
+        assert prev_day_levels([]) == []
         assert prev_week_levels([]) == []
+        levels = prev_day_levels([d1_bar(4, 105, 95, 100)])
+        assert {lv.name: lv.price for lv in levels}["PDH"] == 105.0
 
 
 class TestSessionLevels:
@@ -154,15 +158,18 @@ class TestVolatility:
         assert regime_from_percentile(50) is Regime.NORMAL
         assert regime_from_percentile(95) is Regime.HIGH
 
-    def test_adr_excludes_forming_day(self) -> None:
+    # Closed-only contract: the service feeds a series without the forming
+    # day, so adr() uses every bar. exclude_today=True stays for callers
+    # that still hold the forming bar.
+    def test_adr_uses_all_closed_bars(self) -> None:
         bars = [d1_bar(1, 110, 90, 100)] * 10 + [d1_bar(11, 500, 90, 400)]
         value = adr(bars, period=20)
-        assert value == pytest.approx(20.0)  # the 500-range bar excluded
+        assert value > 20.0  # every closed bar counts
 
-    def test_adr_includes_when_asked(self) -> None:
+    def test_adr_excludes_newest_when_asked(self) -> None:
         bars = [d1_bar(1, 110, 90, 100)] * 10 + [d1_bar(11, 500, 90, 400)]
-        value = adr(bars, period=20, exclude_today=False)
-        assert value > 20.0
+        value = adr(bars, period=20, exclude_today=True)
+        assert value == pytest.approx(20.0)  # the 500-range bar excluded
 
     def test_adr_used_pct(self) -> None:
         today = d1_bar(11, 130, 100, 125)
@@ -174,7 +181,10 @@ class TestVolatility:
         d1 = [d1_bar(1, 110, 90, 100)] * 25 + [d1_bar(2, 112, 100, 108)]
         snap = volatility_snapshot(h1, d1, atr_history=[1.0] * 100)
         assert snap.atr == pytest.approx(1.0)
-        assert snap.adr == pytest.approx(20.0)
+        # Closed-only: the average includes the newest closed bar (12 range)
+        # over the default 20-bar window: (19 x 20 + 12) / 20 = 19.6
+        assert snap.adr == pytest.approx(19.6)
+        assert snap.adr_used_pct == 0.0
         assert snap.regime is Regime.NORMAL
 
 
