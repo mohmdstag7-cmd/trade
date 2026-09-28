@@ -540,3 +540,32 @@ green on this branch.
 See CODE_REVIEW.md §10 (code signing, cloud schema versioning, rollback on
 failed apply, MT5 Common-path resolution, dead-letter tooling, dependency
 lock file, SHA-pinning actions, `order_check` retcode on real hardware).
+
+## Round 2 — Code review fixes (`fix/code-review-round2`)
+
+### Built
+
+- `docs/CODE_REVIEW.md` — full round-2 findings list: 52 issues
+  (2 CRITICAL / 18 HIGH / 24 MEDIUM / 8 LOW) produced by an automated
+  Opus-5.5 deep review of the entire codebase plus CI forensics.
+- Fixes applied for CRITICAL + HIGH + safe MEDIUM/LOW findings across:
+  storage (atomicity, races, retention safety, RLS-hardened Supabase schema),
+  analysis, MT5 gateway, observability, UI, updater, CI and packaging.
+- CI: corrupted `branches: ain]` filters fixed to `[main]` (5 occurrences
+  across 4 workflows), all actions pinned to commit SHAs, pip install
+  hardened with retries/timeouts (2026-09-28 PyPI flake made CI red).
+- `uv.lock` added (SPEC D1 lock-file requirement).
+
+### Deferred
+
+- R2-004 (live closed-bar cache backfill): accepting gap-filling bars
+  older than the newest bar conflicts with the conservative contract
+  enforced by the test suite (any new bar <= newest is a TIME_JUMP and is
+  dropped). Historical backfill belongs to the explicit history-import
+  path, not the live ingest. Documented in `docs/CODE_REVIEW.md`.
+
+### Verification
+
+- `ruff check .` — clean; `ruff format --check .` — clean.
+- `mypy` — clean (85 source files).
+- `pytest` — full suite green (Linux, offscreen Qt; FakeMT5 only).
