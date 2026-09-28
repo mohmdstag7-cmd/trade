@@ -42,7 +42,7 @@ import sys
 import time
 from typing import Any
 
-from app.updater.manifest import MANIFEST_NAME, load_manifest, verify_tree
+from app.updater.manifest import MANIFEST_NAME, _entries, load_manifest, verify_tree
 
 #: Grace period for the running app to exit before it is force-killed.
 _PARENT_TIMEOUT_S = 75.0
@@ -361,7 +361,19 @@ def run_apply_update(
         # tampered staging tree still got swapped in, and a failed post-check
         # merely logged "mismatch" and reported success with the staging
         # tree deleted (no retry material left).
-        pre_problems = verify_tree(staging, manifest)
+        # Delta staging only contains changed files + manifest, so a full
+        # tree verification would always report missing unchanged files.
+        # Detect delta vs full by comparing staged files to manifest entries.
+        staged_rel = {
+            p.relative_to(staging).as_posix()
+            for p in staging.rglob("*")
+            if p.is_file() and p.relative_to(staging).as_posix() != MANIFEST_NAME
+        }
+        known_files = set(_entries(manifest).keys())
+        if staged_rel.issubset(known_files) and len(staged_rel) < len(known_files):
+            pre_problems = verify_tree(staging, manifest, subset=staged_rel)
+        else:
+            pre_problems = verify_tree(staging, manifest)
         if pre_problems:
             raise ApplyError(f"staged tree verification failed: {', '.join(pre_problems[:5])}")
         extra = files_outside_manifest(staging, manifest)
