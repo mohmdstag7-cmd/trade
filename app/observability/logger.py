@@ -309,8 +309,10 @@ def _ensure_category_sink(category: str) -> None:
 def enforce_total_size_cap(logs_dir: Path, cap_mb: float) -> int:
     """Delete oldest files under ``logs_dir`` until the folder fits the cap.
 
-    Returns the number of files removed. Today's active files are the
-    newest, so an oldest-first prune never touches them in practice.
+    Returns the number of files removed. The live sink (``all.log`` and
+    rotated variants) and the dated file for today per category are
+    excluded, so a small cap can never delete a file the logger is still
+    holding open. Everything else prunes oldest-mtime-first.
     """
     cap_bytes = cap_mb * 1024 * 1024
     files = [path for path in logs_dir.rglob("*") if path.is_file()]
@@ -321,6 +323,8 @@ def enforce_total_size_cap(logs_dir: Path, cap_mb: float) -> int:
         except OSError:
             continue
     over = total - cap_bytes
+    if over <= 0:
+        return 0
     removed = 0
 
     def _mtime(path: Path) -> float:
@@ -331,7 +335,24 @@ def enforce_total_size_cap(logs_dir: Path, cap_mb: float) -> int:
         except OSError:
             return 0.0
 
-    for path in sorted(files, key=_mtime):
+    # Exclude active files: all.log (and rotated variants) and the dated
+    # file for *today* per category, identified by its filename (e.g.
+    # ``2026-09-28.jsonl``). Older-dated files are prunable even if their
+    # mtime is recent (a test or a manual touch), because the filename —
+    # not the mtime — is what tells the pruner which file the logger is
+    # still appending to.
+    today_str = datetime.now(UTC).strftime("%Y-%m-%d")
+    candidates: list[Path] = []
+    for path in files:
+        # all.log is the live readable sink; never delete it
+        if path.name == "all.log" or path.name.startswith("all.log."):
+            continue
+        # today's JSONL files are still being written to
+        if path.name == f"{today_str}.jsonl":
+            continue
+        candidates.append(path)
+
+    for path in sorted(candidates, key=_mtime):
         if over <= 0:
             break
         try:

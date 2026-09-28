@@ -75,6 +75,12 @@ class Watchdog:
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join(timeout=self._config.check_interval_s * 2)
+            if self._thread.is_alive():
+                log.warning(
+                    "watchdog: monitor thread did not exit within {:.1f}s — still draining",
+                    self._config.check_interval_s * 2,
+                )
+                return
             self._thread = None
 
     # -- registration ------------------------------------------------------------

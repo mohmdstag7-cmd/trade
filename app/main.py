@@ -437,7 +437,7 @@ def _build_market_service(bus: Any) -> tuple[Any, Any | None, Any | None]:
     )
 
 
-def _maybe_auto_connect(gateway: Any, bus: Any) -> None:
+def _maybe_auto_connect(gateway: Any, bus: Any, window: Any | None = None) -> None:
     """Connect at startup when the account is configured and allowed to."""
     from app.core.settings import Mt5AccountSettings
     from app.mt5.credentials import CredentialStore, CredentialStoreError
@@ -469,10 +469,24 @@ def _maybe_auto_connect(gateway: Any, bus: Any) -> None:
             loguru.logger.warning("startup: auto-connect failed: {}", detail)
         bus.gateway_state_changed.emit("connected" if ok else "disconnected", detail)
 
-    worker = ConnectWorker(gateway, request)
+    # Parent to the window so the thread is not GC'd while running and is
+    # cleaned up with the window. Fall back to unparented if the worker
+    # does not accept a parent argument (test fakes).
+    parent = window if window is not None else None
+    try:
+        worker = ConnectWorker(gateway, request, parent=parent)
+    except TypeError:
+        worker = ConnectWorker(gateway, request)
+        if parent is not None:
+            with contextlib.suppress(Exception):
+                worker.setParent(parent)
     worker.result_ready.connect(_on_result)
     worker.start()
-    # keep a module-level reference so the thread is not garbage collected
+    # Store on the window for closeEvent cleanup and keep a module-level
+    # reference as a fallback so the thread is not garbage collected if
+    # the window is not available (e.g. tests).
+    if window is not None:
+        window._auto_connect_worker = worker
     _maybe_auto_connect._worker = worker  # type: ignore[attr-defined]
 
 
@@ -520,7 +534,9 @@ def run_gui(debug: bool = False) -> int:
     # whose helpers race the same install tree.
     from PySide6.QtCore import QLockFile
 
-    lock = QLockFile(str(default_data_dir() / "app.lock"))
+    data_dir = default_data_dir()
+    data_dir.mkdir(parents=True, exist_ok=True)
+    lock = QLockFile(str(data_dir / "app.lock"))
     if not lock.tryLock(0):
         import loguru
 
@@ -590,11 +606,39 @@ def run_gui(debug: bool = False) -> int:
         market_analysis=market_service,
         shared_gateway=shared_gateway,
     )
+    # Ensure the auto-connect worker is cleaned up when the window closes:
+    # patch closeEvent to quit/wait the worker so it cannot emit
+    # gateway_state_changed after shutdown or leak a thread when a second
+    # auto-connect overwrites the reference.
+    _orig_close_event = window.closeEvent
+
+    def _patched_close_event(event: Any) -> None:
+        for attr in ("_auto_connect_worker", "_startup_update_worker"):
+            worker = getattr(window, attr, None)
+            if worker is not None:
+                with contextlib.suppress(Exception):
+                    if hasattr(worker, "quit"):
+                        worker.quit()
+                    if hasattr(worker, "wait"):
+                        worker.wait(2000)
+        # Fallback: module-level reference from _maybe_auto_connect
+        with contextlib.suppress(Exception):
+            mod_worker = getattr(_maybe_auto_connect, "_worker", None)
+            if mod_worker is not None and mod_worker is not getattr(
+                window, "_auto_connect_worker", None
+            ):
+                if hasattr(mod_worker, "quit"):
+                    mod_worker.quit()
+                if hasattr(mod_worker, "wait"):
+                    mod_worker.wait(2000)
+        return _orig_close_event(event)
+
+    window.closeEvent = _patched_close_event  # type: ignore[method-assign]
     window.show()
 
     # Phase 6 conveniences: reconnect automatically, then ask for updates —
     # both after the window is visible so startup stays snappy.
-    QTimer.singleShot(1500, lambda: _maybe_auto_connect(shared_gateway, bus))
+    QTimer.singleShot(1500, lambda: _maybe_auto_connect(shared_gateway, bus, window))
     QTimer.singleShot(2000, lambda: _resume_pending_update(window))
     if load_check_updates():
         QTimer.singleShot(4000, lambda: _startup_update_check(window))
