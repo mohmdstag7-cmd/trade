@@ -387,7 +387,15 @@ class Migration:
     sql: str
 
 
-MIGRATIONS: tuple[Migration, ...] = (Migration(version=1, name="initial_schema", sql=M001_INITIAL),)
+M002_OUTBOX_MAINTENANCE = """
+-- Purging synced entries and ORDER BY updated_at scans need this index.
+CREATE INDEX IF NOT EXISTS idx_outbox_updated ON outbox (updated_at);
+"""
+
+MIGRATIONS: tuple[Migration, ...] = (
+    Migration(version=1, name="initial_schema", sql=M001_INITIAL),
+    Migration(version=2, name="outbox_maintenance_index", sql=M002_OUTBOX_MAINTENANCE),
+)
 
 
 class MigrationRunner:

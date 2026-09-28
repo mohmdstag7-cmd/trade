@@ -29,28 +29,39 @@ def daily_returns(closes: np.ndarray | list[float]) -> np.ndarray:
 
 
 def rolling_correlation(
-    closes_by_symbol: dict[str, list[float]],
+    closes_by_symbol: dict[str, list[tuple[int, float]]],
     window: int = 50,
 ) -> CorrelationMatrix:
-    """Pearson correlation of aligned return tails across symbols.
+    """Pearson correlation of timestamp-aligned return tails across symbols.
 
-    Uses the LAST ``window`` returns of every series (they must come from
-    the same timeframe/period; the caller aligns them). Pairs with fewer
-    than ``window`` common points get 0.0.
+    ``closes_by_symbol`` maps symbol -> (bar_time, close) pairs oldest to
+    newest. For each pair, returns are computed over the timestamps BOTH
+    symbols share, then the last ``window`` aligned returns are correlated
+    (never position-aligned tails — a missing day on one symbol would
+    silently shift every later bar). Pairs with fewer than ``window``
+    common points get 0.0.
     """
     symbols = sorted(closes_by_symbol)
     n = len(symbols)
     matrix = np.eye(n)
-    returns = {}
+    aligned_returns: dict[str, np.ndarray] = {}
+    common: set[int] | None = None
     for s in symbols:
-        r = daily_returns(closes_by_symbol[s])[-window:]
-        returns[s] = r
+        times = [t for t, _ in closes_by_symbol[s]]
+        common = set(times) if common is None else (common & set(times))
+    if common is None:
+        common = set()
+    for s in symbols:
+        price_by_time = dict(closes_by_symbol[s])
+        shared = sorted(common)
+        closes = [price_by_time[t] for t in shared if t in price_by_time]
+        aligned_returns[s] = daily_returns(closes)[-window:]
     for i, a in enumerate(symbols):
         for j in range(i + 1, n):
             b = symbols[j]
-            ra, rb = returns[a], returns[b]
+            ra, rb = aligned_returns[a], aligned_returns[b]
             m = min(ra.shape[0], rb.shape[0])
-            if m < 3:
+            if m < window:
                 matrix[i, j] = matrix[j, i] = 0.0
                 continue
             va, vb = ra[-m:], rb[-m:]

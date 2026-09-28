@@ -24,7 +24,7 @@ from typing import Any
 
 from app.mt5.errors import TradeError
 from app.mt5.gateway import MT5Gateway
-from app.mt5.models import SymbolSnapshot
+from app.mt5.models import FillingConstants, SymbolSnapshot
 from app.observability.logger import get_logger
 
 log = get_logger("mt5")
@@ -83,17 +83,19 @@ class DemoTradeOutcome:
         return "demo trade test failed before any order was sent"
 
 
-def _select_fill_policy(symbol: SymbolSnapshot, module: Any) -> int:
-    """Pick an allowed filling mode from the symbol's bitmask."""
+def _select_fill_policy(symbol: SymbolSnapshot, constants: FillingConstants) -> int:
+    """Pick an allowed filling mode from the symbol's bitmask.
+
+    Falls back to RETURN when neither FOK nor IOC is advertised; on
+    Instant/Market-execution retail brokers that request can be rejected
+    with retcode 10030 — acceptable for a demo-only smoke test.
+    """
     fill_mode = symbol.fill_mode
-    fok = int(getattr(module, "ORDER_FILLING_FOK", 0))
-    ioc = int(getattr(module, "ORDER_FILLING_IOC", 1))
-    ret = int(getattr(module, "ORDER_FILLING_RETURN", 2))
     if fill_mode & 2:
-        return ioc
+        return constants.order_filling_ioc
     if fill_mode & 1:
-        return fok
-    return ret
+        return constants.order_filling_fok
+    return constants.order_filling_return
 
 
 def _validate_volume(symbol: SymbolSnapshot, requested: float | None) -> float:
@@ -115,16 +117,18 @@ def _round_price(price: float, digits: int) -> float:
     return round(price, digits or 5)
 
 
-def _base_request(symbol: SymbolSnapshot, module: Any, volume: float) -> dict[str, Any]:
+def _base_request(
+    symbol: SymbolSnapshot, constants: FillingConstants, volume: float
+) -> dict[str, Any]:
     return {
-        "action": int(getattr(module, "TRADE_ACTION_DEAL", _ACTION_DEAL)),
+        "action": constants.trade_action_deal,
         "symbol": symbol.name,
         "volume": volume,
         "deviation": 50,
         "magic": DEMO_TEST_MAGIC,
         "comment": DEMO_TEST_COMMENT,
-        "type_time": int(getattr(module, "ORDER_TIME_GTC", 0)),
-        "type_filling": _select_fill_policy(symbol, module),
+        "type_time": constants.order_time_gtc,
+        "type_filling": _select_fill_policy(symbol, constants),
     }
 
 
@@ -165,12 +169,12 @@ def run_demo_trade_test(
         f"digits {symbol.digits}"
     )
 
-    module = gateway._module_or_fail()
+    constants = gateway.wait_for_result(gateway.filling_constants(), "filling_constants", timeout_s)
     tick = gateway.wait_for_result(gateway.tick(broker_symbol), "tick", timeout_s)
     if tick.ask <= 0:
         raise DemoGuardError(f"no valid ask price for {broker_symbol} — market closed?")
 
-    request = _base_request(symbol, module, volume)
+    request = _base_request(symbol, constants, volume)
     request.update(
         type=_ORDER_TYPE_BUY,
         price=_round_price(tick.ask, symbol.digits),
@@ -201,11 +205,19 @@ def run_demo_trade_test(
     position = matching[0]
     outcome.position_ticket = position.ticket
 
-    close_request = _base_request(symbol, module, position.volume)
+    # Fetch a fresh tick for the close — the tick used for the open is
+    # seconds old by now and may be outside the broker's deviation limit,
+    # causing RETCODE_INVALID_PRICE / PRICE_CHANGED and leaving the demo
+    # position open.
+    close_tick = gateway.wait_for_result(gateway.tick(broker_symbol), "tick", timeout_s)
+    if close_tick.bid <= 0:
+        raise DemoGuardError(f"no valid bid price for {broker_symbol} — market closed?")
+
+    close_request = _base_request(symbol, constants, position.volume)
     close_request.update(
         type=_ORDER_TYPE_SELL,
         position=position.ticket,
-        price=_round_price(tick.bid, symbol.digits),
+        price=_round_price(close_tick.bid, symbol.digits),
         sl=0.0,
         tp=0.0,
     )

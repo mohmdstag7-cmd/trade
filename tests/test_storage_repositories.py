@@ -114,11 +114,46 @@ class TestBaseRepository:
         names = [r["component"] for r in repo.recent(10)]
         assert names == ["b", "a"]
 
+    def test_recent_rejects_sql_injection(self, db: Database) -> None:
+        repo = BaseRepository(db, "health_checks")
+        repo.insert({"component": "a", "status": "ok"})
+        with pytest.raises(ValueError, match="invalid identifier"):
+            repo.recent(10, order_by='created_at" DESC; DROP TABLE trades --')
+
     def test_generic_repository_for(self, db: Database) -> None:
         repo = repository_for(db, "daily_reports")
         assert repo.table == "daily_reports"
         repo.insert({"day": "2026-01-01", "report_json": "{}"})
         assert repo.count() == 1
+
+    def test_insert_many_atomic_rollback(self, db: Database, outbox: OutboxRepository) -> None:
+        """Mid-batch failure must roll back all rows and outbox entries."""
+        repo = BaseRepository(db, "trades")
+        # Second row violates NOT NULL? Use duplicate PK to force failure
+        dup_id = new_id()
+        repo.insert({"id": dup_id, "symbol": "EURUSD"})
+        outbox.claim_batch(10)  # drain initial
+        rows = [
+            {"symbol": "GBPUSD"},
+            {"id": dup_id, "symbol": "DUPLICATE"},  # duplicate PK -> IntegrityError
+            {"symbol": "USDJPY"},
+        ]
+        with pytest.raises(Exception):  # noqa: B017
+            repo.insert_many(rows)
+        # All rows from the failed batch must be absent (atomic)
+        assert db.query("SELECT * FROM trades WHERE symbol = 'GBPUSD'") == []
+        assert db.query("SELECT * FROM trades WHERE symbol = 'USDJPY'") == []
+        # No partial outbox entries
+        assert outbox.claim_batch(10) == []
+        # Original row still there
+        assert repo.get(dup_id) is not None
+
+    def test_insert_many_success(self, db: Database, outbox: OutboxRepository) -> None:
+        repo = BaseRepository(db, "trades")
+        n = repo.insert_many([{"symbol": "EURUSD"}, {"symbol": "GBPUSD"}])
+        assert n == 2
+        assert repo.count() == 2
+        assert len(outbox.claim_batch(10)) == 2
 
 
 class TestSignalRepository:
@@ -296,3 +331,21 @@ class TestSmallRepositories:
             ]
         )
         assert n == 2 and repo.count() == 2
+
+    def test_app_logs_bulk_atomic(self, db: Database, outbox: OutboxRepository) -> None:
+        """bulk_insert must be atomic — mid-batch failure rolls back all."""
+        repo = AppLogRepository(db)
+        dup_id = new_id()
+        repo.insert({"id": dup_id, "level": "WARNING", "message": "first"})
+        outbox.claim_batch(10)
+        with pytest.raises(Exception):  # noqa: B017
+            repo.bulk_insert(
+                [
+                    {"level": "WARNING", "message": "ok"},
+                    {"id": dup_id, "level": "ERROR", "message": "duplicate"},
+                    {"level": "WARNING", "message": "also ok"},
+                ]
+            )
+        # Only the original row remains
+        assert repo.count() == 1
+        assert outbox.claim_batch(10) == []

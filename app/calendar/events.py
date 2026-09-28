@@ -14,6 +14,7 @@ year, not a database workload.
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import io
 from dataclasses import dataclass
@@ -135,6 +136,12 @@ class EventStore:
         return len(self._events) - before
 
     def save(self, path: Path | None = None) -> None:
+        """Persist the store atomically (temp file + os.replace).
+
+        A non-atomic write could leave a truncated CSV on crash/power loss
+        — the file is read again at every startup, so corruption here is
+        permanent data loss.
+        """
         target = path or self._path
         if target is None:
             return
@@ -154,7 +161,18 @@ class EventStore:
                     e.previous,
                 ]
             )
-        target.write_text(buffer.getvalue(), encoding="utf-8")
+        import os
+        import tempfile
+
+        fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=target.name, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(buffer.getvalue())
+            os.replace(tmp_name, target)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_name)
+            raise
 
     def replace_from_csv(self, text: str) -> tuple[int, list[str]]:
         """Replace the whole store from exporter CSV content."""
@@ -177,7 +195,13 @@ class EventStore:
         currencies: set[str] | None = None,
         impact_at_least: str = "medium",
     ) -> list[EconomicEvent]:
-        """Future events (soonest first) matching currency/impact filters."""
+        """Future events (soonest first) matching currency/impact filters.
+
+        A naive ``now_utc`` is normalized to UTC instead of raising
+        TypeError against the tz-aware stored events.
+        """
+        if now_utc.tzinfo is None:
+            now_utc = now_utc.replace(tzinfo=UTC)
         min_idx = IMPACT_LEVELS.index(impact_at_least)
         horizon = now_utc + timedelta(minutes=within_minutes)
         out = []

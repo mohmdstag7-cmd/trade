@@ -16,6 +16,7 @@ import threading
 from typing import Any
 
 from app.observability.logger import get_logger
+from app.observability.masking import mask_text
 from app.storage.db import Database
 from app.storage.repositories import AppLogRepository, new_id, now_iso
 
@@ -53,6 +54,7 @@ class StorageLogSink:
         flush_interval_s: float = 5.0,
         max_buffer: int = 500,
     ) -> None:
+        self._db = db
         self._repo = AppLogRepository(db)
         self._min_level = _LEVEL_ORDER.get(min_level.upper(), 30)
         self._flush_interval = flush_interval_s
@@ -60,6 +62,7 @@ class StorageLogSink:
         self._buffer: list[dict[str, Any]] = []
         self._lock = threading.Lock()
         self._stop = threading.Event()
+        self._flush_event = threading.Event()
         self._thread: threading.Thread | None = None
 
     # -- loguru sink ------------------------------------------------------------
@@ -74,7 +77,15 @@ class StorageLogSink:
         if level_no < self._min_level:
             return
         extra = record["extra"]
-        exception = record["exception"]
+        # The global patcher replaces raw exceptions with a pre-masked
+        # traceback (key "exception") so secrets never reach this sink —
+        # and through it, the Supabase mirror. Fall back defensively.
+        exc_masked = extra.get("exception")
+        exc_type = extra.get("exception_type")
+        if exc_masked is None and record["exception"] is not None:
+            raw = record["exception"]
+            exc_type = raw.type.__name__
+            exc_masked = mask_text(str(raw))
         row: dict[str, Any] = {
             "id": new_id(),
             "level": str(record["level"].name),
@@ -86,26 +97,31 @@ class StorageLogSink:
             "signal_id": _opt_str(extra.get("signal_id")),
             "trade_id": _opt_str(extra.get("trade_id")),
             "symbol": _opt_str(extra.get("symbol")),
-            "exception_type": (f"{exception.type.__name__}" if exception is not None else None),
-            "stack_trace": None if exception is None else str(exception)[:4000],
+            "exception_type": exc_type,
+            "stack_trace": None if exc_masked is None else str(exc_masked)[:4000],
             "created_at": now_iso(),
         }
         with self._lock:
             self._buffer.append(row)
-            overflow = len(self._buffer) > self._max_buffer
-        if overflow:
-            self.flush()
+            if len(self._buffer) > self._max_buffer:
+                # Never block the caller (often UI thread) with DB I/O.
+                # Drop oldest entries and signal background thread to flush.
+                excess = len(self._buffer) - self._max_buffer
+                self._buffer = self._buffer[excess:]
+                self._flush_event.set()
 
     # -- lifecycle ---------------------------------------------------------------
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop.clear()
+        self._flush_event.clear()
         self._thread = threading.Thread(target=self._loop, name="log-sink", daemon=True)
         self._thread.start()
 
     def stop(self, timeout_s: float = 3.0) -> None:
         self._stop.set()
+        self._flush_event.set()
         if self._thread is not None:
             self._thread.join(timeout=timeout_s)
             self._thread = None
@@ -122,8 +138,23 @@ class StorageLogSink:
             return self._repo.bulk_insert(rows)
         except Exception:
             log.opt(exception=True).warning("storage: app_logs flush failed")
+            # Re-queue rows back into buffer with size cap to avoid data loss
+            with self._lock:
+                combined = rows + self._buffer
+                if len(combined) > self._max_buffer:
+                    combined = combined[-self._max_buffer :]
+                self._buffer = combined
             return 0
 
     def _loop(self) -> None:
-        while not self._stop.wait(self._flush_interval):
-            self.flush()
+        try:
+            while not self._stop.is_set():
+                # Wait for interval or explicit flush signal
+                self._flush_event.wait(self._flush_interval)
+                self._flush_event.clear()
+                if self._stop.is_set():
+                    break
+                self.flush()
+        finally:
+            # sqlite connections are thread-bound: close our own on exit
+            self._db.close_thread_connection()

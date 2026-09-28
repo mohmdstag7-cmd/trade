@@ -40,8 +40,9 @@ import shutil
 import subprocess
 import sys
 import time
+from typing import Any
 
-from app.updater.manifest import MANIFEST_NAME, load_manifest, verify_tree
+from app.updater.manifest import MANIFEST_NAME, _entries, load_manifest, verify_tree
 
 #: Grace period for the running app to exit before it is force-killed.
 _PARENT_TIMEOUT_S = 75.0
@@ -204,14 +205,55 @@ def install_tree(
     return len(staged_files)
 
 
+def _contained(relative: pathlib.Path) -> bool:
+    """Reject absolute paths and ``..`` segments (path traversal)."""
+    if relative.is_absolute():
+        return False
+    return ".." not in relative.parts
+
+
+def files_outside_manifest(staging: pathlib.Path, manifest: dict[str, Any]) -> list[str]:
+    """Staged files (besides the manifest itself) absent from the manifest."""
+    from app.updater.manifest import _entries
+
+    known = set(_entries(manifest))
+    out: list[str] = []
+    for path in sorted(staging.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(staging).as_posix()
+        if rel == MANIFEST_NAME:
+            continue
+        if rel not in known:
+            out.append(rel)
+    return out
+
+
 def apply_removed_files(
     app_dir: pathlib.Path,
     removed: tuple[str, ...],
     log: ApplyLog,
 ) -> None:
-    """Delete files the new release no longer ships."""
+    """Delete files the new release no longer ships.
+
+    Paths are validated against the app dir (no absolutes, no ``..``) —
+    the list originates from update metadata, and an unvalidated unlink
+    would be an arbitrary-file-deletion primitive.
+    """
+    app_resolved = app_dir.resolve()
     for rel in removed:
-        target = app_dir / pathlib.Path(rel)
+        rel_path = pathlib.Path(rel.replace("\\", "/"))
+        if not _contained(rel_path):
+            log(f"refused suspicious removed entry: {rel!r}")
+            continue
+        target = app_dir / rel_path
+        try:
+            resolved = target.resolve()
+            if app_resolved not in resolved.parents and resolved != app_resolved:
+                log(f"refused removed entry outside app dir: {rel!r}")
+                continue
+        except OSError:
+            pass  # cannot resolve — fall through to unlink (still relative-safe)
         try:
             target.unlink()
             log(f"removed {rel}")
@@ -314,6 +356,33 @@ def run_apply_update(
         if manifest is None:
             raise ApplyError(f"staged {MANIFEST_NAME} missing or unreadable")
 
+        # Verify the staging tree BEFORE touching the app folder. Previously
+        # the tree was installed first and verified after — a corrupted or
+        # tampered staging tree still got swapped in, and a failed post-check
+        # merely logged "mismatch" and reported success with the staging
+        # tree deleted (no retry material left).
+        # Delta staging only contains changed files + manifest, so a full
+        # tree verification would always report missing unchanged files.
+        # Detect delta vs full by comparing staged files to manifest entries.
+        staged_rel = {
+            p.relative_to(staging).as_posix()
+            for p in staging.rglob("*")
+            if p.is_file() and p.relative_to(staging).as_posix() != MANIFEST_NAME
+        }
+        known_files = set(_entries(manifest).keys())
+        if staged_rel.issubset(known_files) and len(staged_rel) < len(known_files):
+            pre_problems = verify_tree(staging, manifest, subset=staged_rel)
+        else:
+            pre_problems = verify_tree(staging, manifest)
+        if pre_problems:
+            raise ApplyError(f"staged tree verification failed: {', '.join(pre_problems[:5])}")
+        extra = files_outside_manifest(staging, manifest)
+        if extra:
+            # Files the manifest does not describe were never hashed — a
+            # zip can smuggle them in. Fail closed instead of installing.
+            raise ApplyError(f"staging contains files outside the manifest: {', '.join(extra[:5])}")
+        log("staging verification OK")
+
         if wait_for_exit(parent_pid):
             log(f"app (pid={parent_pid}) exited")
         else:
@@ -327,9 +396,10 @@ def run_apply_update(
 
         problems = verify_tree(app_dir, manifest)
         if problems:
-            log(f"post-install verification mismatch: {', '.join(problems[:5])}")
-        else:
-            log("post-install verification OK")
+            # Fatal, not cosmetic: the installed tree is half-verified.
+            # Staging is NOT cleaned here so the next start can re-offer.
+            raise ApplyError(f"post-install verification mismatch: {', '.join(problems[:5])}")
+        log("post-install verification OK")
 
         cleanup(staging, removed_list_path(app_dir, staging), log)
         if relaunch_app:

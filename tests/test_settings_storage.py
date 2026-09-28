@@ -112,7 +112,7 @@ class TestStorageCard:
     ) -> None:
         page = page_factory(storage)
         assert page._storage_title.text() == "Storage & Sync"
-        assert "Schema version: 1" in page._schema_label.text()
+        assert "Schema version: 2" in page._schema_label.text()
 
     def test_card_absent_without_storage(self, qtbot: Any, page_factory: Any) -> None:
         page = page_factory(None)

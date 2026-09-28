@@ -16,10 +16,12 @@ Design notes:
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Any, Protocol
 
 from app.observability.logger import get_logger
+from app.observability.masking import mask_text
 from app.storage.vault import KeyringVault
 
 log = get_logger("sync")
@@ -92,9 +94,17 @@ class SupabaseMirror:
 
     # -- operations --------------------------------------------------------------
     def upsert(self, table: str, rows: list[dict[str, Any]]) -> None:
-        """Upsert a batch of rows (idempotent by the ``id`` column)."""
+        """Upsert a batch of rows (idempotent by the ``id`` column).
+
+        SQLite stores JSON-shaped columns (``*_json``) as TEXT; the cloud
+        schema declares them ``jsonb``. Sending the raw string would
+        double-encode (PostgREST stores the STRING ``"[{...}]"`` instead
+        of the array), so string-typed ``*_json`` fields are parsed back
+        into real JSON values before transport.
+        """
         if not rows:
             return
+        rows = [self._decode_json_columns(row) for row in rows]
         try:
             client = self._get_client()
             query = client.table(table).upsert(rows, on_conflict="id")
@@ -103,6 +113,25 @@ class SupabaseMirror:
             raise
         except Exception as exc:
             raise self._classify(exc) from exc
+
+    _JSON_SUFFIX = "_json"
+
+    @classmethod
+    def _decode_json_columns(cls, row: dict[str, Any]) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for key, value in row.items():
+            if (
+                key.endswith(cls._JSON_SUFFIX)
+                and isinstance(value, str)
+                and value[:1] in ("{", "[")
+            ):
+                try:
+                    out[key] = json.loads(value)
+                    continue
+                except ValueError:
+                    pass  # not valid JSON after all — send as-is
+            out[key] = value
+        return out
 
     def probe(self) -> float:
         """Round-trip sanity check. Returns latency in ms or raises."""
@@ -147,7 +176,7 @@ class SupabaseMirror:
                 "supabase/schema.sql in your project.",
                 "client",
             )
-        return MirrorError(f"Supabase mirror failed: {text}", "network")
+        return MirrorError(f"Supabase mirror failed: {mask_text(text)}", "network")
 
 
 class NullMirror:

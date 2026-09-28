@@ -73,6 +73,21 @@ class CandlestickItem(pg.GraphicsObject):
         picture = QPicture()
         painter = QPainter(picture)
         width = max(1.0, self.spacing() * 0.7)
+        # Price-based minimum body height: spacing() is in time units (seconds)
+        # and must not be used as a price height. Use a fraction of the visible
+        # price range so doji/flat candles remain visible without being
+        # wildly oversized on low-priced symbols.
+        price_range = 0.0
+        if self._bounds is not None:
+            price_range = float(self._bounds.height())
+        if price_range <= 0 and self._bars:
+            prices = [v for b in self._bars for v in (b.high, b.low)]
+            if prices:
+                price_range = float(max(prices) - min(prices))
+        min_body = price_range * 0.005 if price_range > 0 else 0.0
+        if min_body <= 0 and self._bars:
+            ref_price = float(self._bars[0].close) if self._bars else 0.0
+            min_body = max(abs(ref_price) * 0.0005, 0.0001) if ref_price else 0.0001
         for bar in self._bars:
             color = (
                 self._up
@@ -87,7 +102,7 @@ class CandlestickItem(pg.GraphicsObject):
             painter.drawLine(QPointF(bar.time, bar.low), QPointF(bar.time, bar.high))
             top = max(bar.open, bar.close)
             bottom = min(bar.open, bar.close)
-            body_height = max(top - bottom, self.spacing() * 0.02)
+            body_height = max(top - bottom, min_body)
             painter.drawRect(QRectF(bar.time - width / 2, bottom, width, body_height))
         painter.end()
         return picture
@@ -135,6 +150,14 @@ class PriceChart(pg.GraphicsLayoutWidget):
         self._last_price_line.setZValue(10)
         self._price_plot.addItem(self._last_price_line)
         self._volume_bars: pg.BarGraphItem | None = None
+        # Auto-range only until the user pans/zooms manually — a blind
+        # autoRange() on every refresh threw away their viewport each minute.
+        self._user_ranged = False
+        for plot in (self._price_plot, self._volume_plot):
+            plot.getViewBox().sigRangeChangedManually.connect(self._on_manual_range)
+
+    def _on_manual_range(self, *args: object) -> None:
+        self._user_ranged = True
 
     # -- data -------------------------------------------------------------------
     def set_data(self, bars: list[RateBar]) -> None:
@@ -158,8 +181,9 @@ class PriceChart(pg.GraphicsLayoutWidget):
                 brushes=brushes,
             )
             self._volume_plot.addItem(self._volume_bars)
-            self._price_plot.autoRange()
-            self._volume_plot.autoRange()
+            if not self._user_ranged:
+                self._price_plot.autoRange()
+                self._volume_plot.autoRange()
         else:
             self._last_price_line.hide()
 

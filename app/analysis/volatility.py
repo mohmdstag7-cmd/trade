@@ -39,11 +39,13 @@ def atr_percentile(atr_history: np.ndarray | list[float], period: int = 100) -> 
     return (below + 0.5 * max(equal, 0.0)) / float(n) * 100.0
 
 
-def adr(d1_bars: list[RateBar], period: int = 20, *, exclude_today: bool = True) -> float:
+def adr(d1_bars: list[RateBar], period: int = 20, *, exclude_today: bool = False) -> float:
     """Average daily range (high-low) over the last ``period`` CLOSED days.
 
-    ``exclude_today`` keeps the still-forming daily bar (the newest) out of
-    the average — it is not complete yet.
+    The series fed by the service contains closed bars only (the forming
+    day is excluded at ingest), so the default does NOT drop the newest
+    bar. ``exclude_today=True`` remains available for callers that pass a
+    series still containing the forming bar.
     """
     bars = d1_bars[:-1] if (exclude_today and len(d1_bars) > 1) else d1_bars
     if not bars:
@@ -97,7 +99,10 @@ def volatility_snapshot(
 
     pct = atr_percentile(atr_history)
     adr_value = adr(d1_bars)
-    today = d1_bars[-1] if d1_bars else None
+    # Closed-only series: there is no "today" forming bar here, so
+    # adr_used_pct has no in-series input. Pass None (0.0) — a live
+    # forming-day figure belongs to the tick-based path, not this one.
+    today: RateBar | None = None
     return VolatilitySnapshot(
         atr=last_atr,
         atr_percentile=pct,

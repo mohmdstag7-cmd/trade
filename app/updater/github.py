@@ -85,6 +85,24 @@ def releases_page_url(repo: str = REPO_SLUG) -> str:
     return f"https://github.com/{repo}/releases"
 
 
+def _strip_userinfo(url: str) -> str:
+    """Mask any user:password@ portion before logging a proxy URL."""
+    try:
+        from urllib.parse import urlsplit, urlunsplit
+
+        parts = urlsplit(url)
+        if parts.username is None and parts.password is None:
+            return url
+        host = parts.hostname or ""
+        if parts.port:
+            host = f"{host}:{parts.port}"
+        return urlunsplit((parts.scheme, host, parts.path, parts.query, parts.fragment))
+    except ValueError:
+        return "<proxy>"
+    except Exception:
+        return "<proxy>"
+
+
 def detect_proxy() -> str | None:
     """Proxy URL for GitHub traffic, honouring the Windows system proxy.
 
@@ -134,7 +152,10 @@ class ReleaseFetcher:
         self._connect_timeout_s = timeout_s
         self._proxy = proxy if proxy is not None else detect_proxy()
         if self._proxy:
-            logger.info("updates net: using proxy {}", self._proxy)
+            logger.info(
+                "updates net: using proxy {}",
+                _strip_userinfo(self._proxy),
+            )
 
     def _client(self, *, read_timeout_s: float = _READ_TIMEOUT_S) -> httpx.Client:
         timeout = httpx.Timeout(
@@ -161,6 +182,12 @@ class ReleaseFetcher:
                 translated = _translate_http_error(exc)
                 if translated is not exc:
                     last = translated
+                import httpx as _httpx
+
+                if isinstance(exc, _httpx.HTTPStatusError):
+                    # 404/410 are definitive answers, not transport
+                    # faults - retrying only delays the fallback.
+                    break
                 if tries_left == 0:
                     break
                 delay = _RETRY_DELAYS_S[min(len(_RETRY_DELAYS_S) - 1, _RETRIES - 1 - tries_left)]

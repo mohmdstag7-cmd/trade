@@ -175,7 +175,9 @@ class Sidebar(QFrame):
     # -- internals ---------------------------------------------------------------
     def _update_collapse_button(self) -> None:
         tokens = self._theme_manager.tokens if self._theme_manager is not None else None
-        chevron = "collapse_right" if self._collapsed else "collapse_left"
+        rtl = self.layoutDirection() == Qt.LayoutDirection.RightToLeft
+        expand_right = self._collapsed != rtl  # RTL mirrors the geometry
+        chevron = "collapse_left" if expand_right else "collapse_right"
         if tokens is not None:
             ic = icon(chevron, tokens.text_secondary)
             if ic is not None:
@@ -212,6 +214,13 @@ class Sidebar(QFrame):
             self.setMaximumWidth(target)
             self.retranslate()
             return
+        if self._animation is not None:
+            # Stop and drop the previous group: every toggle used to create
+            # a new parented group (plus 2 animations), accumulating for
+            # the whole session.
+            self._animation.stop()
+            self._animation.deleteLater()
+            self._animation = None
         group = QParallelAnimationGroup(self)
         for prop in (b"minimumWidth", b"maximumWidth"):
             anim = QPropertyAnimation(self)

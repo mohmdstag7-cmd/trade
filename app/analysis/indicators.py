@@ -105,6 +105,10 @@ def true_range(
     c = _as_f64(closes)
     if not (h.shape[0] == lows_a.shape[0] == c.shape[0]):
         raise ValueError("highs/lows/closes must have the same length")
+    if h.shape[0] == 0:
+        # Empty input returns an empty series instead of raising IndexError
+        # (same-length contract with the OHLC arrays).
+        return h
     prev_close = np.concatenate(([c[0]], c[:-1]))
     tr: np.ndarray = np.maximum(
         h - lows_a, np.maximum(np.abs(h - prev_close), np.abs(lows_a - prev_close))
@@ -122,7 +126,10 @@ def atr(
     if period < 1:
         raise ValueError("period must be >= 1")
     tr = true_range(highs, lows, closes)
-    return _wilder(tr, period)
+    if tr.shape[0] == 0:
+        return tr
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return _wilder(tr, period)
 
 
 def adx(
@@ -151,17 +158,37 @@ def adx(
     plus_dm = np.where((up_move > down_move) & (up_move > 0.0), up_move, 0.0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0.0), down_move, 0.0)
 
-    tr = true_range(h, lows_a, c)[1:]
-    atr_smooth = _wilder(tr, period)
-    plus_di = 100.0 * _wilder(plus_dm, period) / atr_smooth
-    minus_di = 100.0 * _wilder(minus_dm, period) / atr_smooth
+    with np.errstate(divide="ignore", invalid="ignore"):
+        tr = true_range(h, lows_a, c)[1:]
+        atr_smooth = _wilder(tr, period)
+        # Guard perfectly flat / illiquid series (atr_smooth == 0).
+        safe_atr = np.where(atr_smooth == 0.0, np.nan, atr_smooth)
+        plus_di = 100.0 * _wilder(plus_dm, period) / safe_atr
+        minus_di = 100.0 * _wilder(minus_dm, period) / safe_atr
 
-    denom = plus_di + minus_di
-    dx = 100.0 * np.abs(plus_di - minus_di) / np.where(denom == 0.0, np.nan, denom)
-    adx_arr = _wilder(np.nan_to_num(dx, nan=0.0), period)
-    # _wilder seeds with an SMA over the first `period` values; positions
-    # before that are NaN which is what we want for DX as well.
-    return adx_arr, plus_di, minus_di
+        denom = plus_di + minus_di
+        dx = 100.0 * np.abs(plus_di - minus_di) / np.where(denom == 0.0, np.nan, denom)
+
+    # Seed the ADX with VALID DX values only: the naive nan_to_num(dx, 0)
+    # let the leading NaN region (DI undefined) enter as zeros and biased
+    # the SMA seed badly (verified: 44.7 vs 100 on a trending series).
+    valid_dx = ~np.isnan(dx)
+    m = dx.shape[0]
+    adx_arr = np.full(m, np.nan)
+    if valid_dx.any():
+        first_valid = int(np.argmax(valid_dx))
+        adx_valid = _wilder(dx[first_valid:], period)
+        writable = adx_valid[period - 1 :]
+        end = min(m, first_valid + period - 1 + writable.shape[0])
+        adx_arr[first_valid + period - 1 : end] = writable[: end - (first_valid + period - 1)]
+    # _wilder leaves NaN before the seed position — ADX now stays NaN until
+    # roughly 2 * period bars, as documented.
+    # Pad to length n to preserve same-length contract (R2-003).
+    pad = np.array([np.nan])
+    adx_padded = np.concatenate([pad, adx_arr])
+    plus_di_padded = np.concatenate([pad, plus_di])
+    minus_di_padded = np.concatenate([pad, minus_di])
+    return adx_padded, plus_di_padded, minus_di_padded
 
 
 def slope_pct(values: np.ndarray | list[float], lookback: int = 5) -> np.ndarray:

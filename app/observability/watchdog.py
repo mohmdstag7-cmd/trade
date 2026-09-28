@@ -75,6 +75,12 @@ class Watchdog:
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join(timeout=self._config.check_interval_s * 2)
+            if self._thread.is_alive():
+                log.warning(
+                    "watchdog: monitor thread did not exit within {:.1f}s — still draining",
+                    self._config.check_interval_s * 2,
+                )
+                return
             self._thread = None
 
     # -- registration ------------------------------------------------------------
@@ -110,11 +116,30 @@ class Watchdog:
                 reg.frozen = False
                 log.warning("watchdog: {!r} recovered", name)
 
+    def heartbeat_factory(self, name: str) -> Callable[[], None]:
+        """Return a zero-arg heartbeat callback bound to ``name``.
+
+        Beating an unregistered name is a cheap no-op, so workers can be
+        constructed before ``register()`` runs.
+        """
+
+        def _beat() -> None:
+            self.heartbeat(name)
+
+        return _beat
+
     # -- checking ---------------------------------------------------------------
     def check_once(self) -> tuple[str, ...]:
-        """Run one check pass; return the names that froze in this pass."""
+        """Run one check pass; return the names that froze in this pass.
+
+        ``notify``/``restart`` callbacks run OUTSIDE the lock: they may
+        call back into :meth:`register`/:meth:`heartbeat` (a restart
+        usually re-registers the worker), which would deadlock the
+        non-reentrant lock. A slow callback also must not block every
+        other worker's heartbeat.
+        """
         now = self._time_fn()
-        newly_frozen: list[str] = []
+        actions: list[tuple[str, NotifyCallback | None, RestartCallback | None]] = []
         with self._lock:
             for reg in self._registrations.values():
                 elapsed = now - reg.last_beat
@@ -122,24 +147,26 @@ class Watchdog:
                     continue
                 if elapsed > reg.timeout_s:
                     reg.frozen = True
-                    newly_frozen.append(reg.name)
                     log.critical(
                         "watchdog: {!r} frozen for {:.1f}s (timeout={}s)",
                         reg.name,
                         elapsed,
                         reg.timeout_s,
                     )
-                    restart = reg.restart
-                    notify = self._config.notify
-                    if notify is not None:
-                        notify(reg.name)
-                    if restart is not None:
-                        try:
-                            restart(reg.name)
-                        except Exception:
-                            log.opt(exception=True).critical(
-                                "watchdog: restart of {!r} failed", reg.name
-                            )
+                    actions.append((reg.name, self._config.notify, reg.restart))
+        newly_frozen: list[str] = []
+        for name, notify, restart in actions:
+            newly_frozen.append(name)
+            if notify is not None:
+                try:
+                    notify(name)
+                except Exception:
+                    log.opt(exception=True).critical("watchdog: notify for {!r} failed", name)
+            if restart is not None:
+                try:
+                    restart(name)
+                except Exception:
+                    log.opt(exception=True).critical("watchdog: restart of {!r} failed", name)
         return tuple(newly_frozen)
 
     # -- internals --------------------------------------------------------------

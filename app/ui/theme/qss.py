@@ -16,6 +16,8 @@ opt into named styles via ``objectName`` / dynamic properties, e.g.:
 
 from __future__ import annotations
 
+import re
+
 from app.ui.theme.tokens import (
     FONT_SIZE_BODY,
     FONT_SIZE_CAPTION,
@@ -30,9 +32,6 @@ from app.ui.theme.tokens import (
 )
 
 _QSS_TEMPLATE = """
-* {{
-  outline: none;
-}}
 QWidget {{
   background: {t.bg};
   color: {t.text};
@@ -705,9 +704,15 @@ QMenu::separator {{
 """
 
 
-def build_qss(tokens: ThemeTokens) -> str:
-    """Generate the full application stylesheet for ``tokens``."""
-    return _QSS_TEMPLATE.format(
+def build_qss(tokens: ThemeTokens, *, rtl: bool = False) -> str:
+    """Generate the full application stylesheet for ``tokens``.
+
+    With ``rtl=True`` the physical border sides are mirrored (QSS
+    ``border-left/right`` do not flip automatically under RTL layout):
+    the sidebar separator and the active-nav accent bar stay on the
+    *leading* edge, matching the flipped layout direction.
+    """
+    qss = _QSS_TEMPLATE.format(
         t=tokens,
         h1=FONT_SIZE_H1,
         h2=FONT_SIZE_H2,
@@ -719,3 +724,33 @@ def build_qss(tokens: ThemeTokens) -> str:
         radius_lg=RADIUS_LG,
         mono=MONO_FONT_STACK,
     )
+    if not rtl:
+        return qss
+    # Use regex with word boundaries so replacements only affect property
+    # names, not occurrences inside comments, URLs, or future token values.
+    qss = re.sub(r"\bborder-left\b", "border-__TMP__", qss)
+    qss = re.sub(r"\bborder-right\b", "border-left", qss)
+    qss = re.sub(r"\bborder-__TMP__\b", "border-right", qss)
+    qss = re.sub(r"\bpadding-left\b", "padding-__TMP__", qss)
+    qss = re.sub(r"\bpadding-right\b", "padding-left", qss)
+    qss = re.sub(r"\bpadding-__TMP__\b", "padding-right", qss)
+    qss = re.sub(r"\bmargin-left\b", "margin-__TMP__", qss)
+    qss = re.sub(r"\bmargin-right\b", "margin-left", qss)
+    qss = re.sub(r"\bmargin-__TMP__\b", "margin-right", qss)
+    # Mirror directional properties (e.g. QGroupBox::title left: 12px)
+    qss = re.sub(r"\bleft\s*:", "__TMP_LEFT__:", qss)
+    qss = re.sub(r"\bright\s*:", "left:", qss)
+    qss = re.sub(r"__TMP_LEFT__:", "right:", qss)
+
+    # Mirror 4-value shorthands: padding: top right bottom left -> top left bottom right
+    def _mirror_shorthand(m: re.Match[str]) -> str:
+        prop = m.group(1)
+        vals_str = m.group(2).strip()
+        vals = vals_str.split()
+        if len(vals) == 4:
+            vals[1], vals[3] = vals[3], vals[1]
+            return f"{prop}: {' '.join(vals)}"
+        return m.group(0)
+
+    qss = re.sub(r"\b(padding|margin)\s*:\s*([^;{}]+);", _mirror_shorthand, qss)
+    return qss

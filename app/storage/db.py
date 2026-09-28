@@ -63,27 +63,35 @@ class Database:
                 isolation_level=None,  # explicit transaction control
             )
             conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL")
+            row = conn.execute("PRAGMA journal_mode=WAL").fetchone()
+            mode = str(row[0]).lower() if row is not None else ""
+            if mode != "wal":
+                conn.close()
+                msg = f"WAL mode not available (got {mode!r}) at {self._path}"
+                raise DatabaseError(msg)
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA foreign_keys=ON")
             conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
             return conn
+        except DatabaseError:
+            raise
         except sqlite3.Error as exc:
             msg = f"could not open the database at {self._path}: {exc}"
             raise DatabaseError(msg) from exc
 
     def connection(self) -> sqlite3.Connection:
         """Return the calling thread's connection (created on first use)."""
-        if self._closed:
-            msg = "database is closed"
-            raise DatabaseError(msg)
-        conn: sqlite3.Connection | None = getattr(self._local, "conn", None)
-        if conn is None:
+        with self._all_conns_lock:
+            if self._closed:
+                msg = "database is closed"
+                raise DatabaseError(msg)
+            conn: sqlite3.Connection | None = getattr(self._local, "conn", None)
+            if conn is not None:
+                return conn
             conn = self._connect_raw()
             self._local.conn = conn
-            with self._all_conns_lock:
-                self._all_conns.append(conn)
-        return conn
+            self._all_conns.append(conn)
+            return conn
 
     # -- helpers ---------------------------------------------------------------
     def execute(self, sql: str, params: tuple | list = ()) -> sqlite3.Cursor:
@@ -116,12 +124,18 @@ class Database:
             yield conn
             return
         self._local.in_transaction = True
+        began = False
         try:
             conn.execute("BEGIN IMMEDIATE")
+            began = True
             yield conn
             conn.execute("COMMIT")
         except BaseException:
-            conn.execute("ROLLBACK")
+            # A failed BEGIN must not trigger a bogus ROLLBACK (which would
+            # mask the original error with "no transaction is active").
+            if began:
+                with contextlib.suppress(sqlite3.Error):
+                    conn.execute("ROLLBACK")
             raise
         finally:
             self._local.in_transaction = False
@@ -139,16 +153,23 @@ class Database:
                     self._all_conns.remove(conn)
 
     def close_all(self) -> None:
-        """Close every connection opened by any thread (shutdown path)."""
+        """Mark the database closed and best-effort close known connections.
+
+        sqlite3 connections can only be USED and CLOSED by their owning
+        thread; worker threads are expected to call
+        :meth:`close_thread_connection` on shutdown (the outbox worker,
+        log sink and cleanup scheduler do). Foreign-thread closes here
+        fail silently by design — the handles are reclaimed at process
+        exit either way.
+        """
         with self._all_conns_lock:
+            self._closed = True
             conns = list(self._all_conns)
+            self._all_conns.clear()
         for conn in conns:
             with contextlib.suppress(sqlite3.Error):
                 conn.close()
-        with self._all_conns_lock:
-            self._all_conns.clear()
         self._local = threading.local()
-        self._closed = True
 
     # -- introspection ---------------------------------------------------------
     def table_names(self) -> list[str]:

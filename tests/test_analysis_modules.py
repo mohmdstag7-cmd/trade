@@ -98,10 +98,15 @@ class TestTrendMatrix:
         assert build_matrix({}).bias_score == 0
 
 
+def _ts(closes, t0=1_000_000, step=86_400):
+    """Attach server-epoch timestamps to a close series for correlation."""
+    return [(t0 + i * step, float(c)) for i, c in enumerate(closes)]
+
+
 class TestCorrelation:
     def test_perfect_correlation(self) -> None:
         base = list(np.linspace(100, 110, 60))
-        corr = rolling_correlation({"EURUSD": base, "GBPUSD": base})
+        corr = rolling_correlation({"EURUSD": _ts(base), "GBPUSD": _ts(base)})
         assert corr.matrix[0, 1] == pytest.approx(1.0)
 
     def test_inverse_correlation(self) -> None:
@@ -109,14 +114,16 @@ class TestCorrelation:
         rets = rng.normal(0, 0.3, 60)
         a = list(100 + np.cumsum(rets))
         b = list(100 - np.cumsum(rets))
-        corr = rolling_correlation({"EURUSD": a, "USDJPY": b})
+        corr = rolling_correlation({"EURUSD": _ts(a), "USDJPY": _ts(b)})
         assert corr.matrix[0, 1] == pytest.approx(-1.0, abs=1e-3)
 
     def test_with_symbol_view(self) -> None:
         base = list(np.linspace(100, 110, 60))
         other = list(np.linspace(50, 55, 60))
         noise = list(np.linspace(100, 100.1, 60))
-        corr = rolling_correlation({"EURUSD": base, "GBPUSD": other, "XAUUSD": noise})
+        corr = rolling_correlation(
+            {"EURUSD": _ts(base), "GBPUSD": _ts(other), "XAUUSD": _ts(noise)}
+        )
         pairs = corr.with_symbol("EURUSD")
         assert pairs["GBPUSD"] == pytest.approx(1.0)
         assert -1.0 <= pairs["XAUUSD"] <= 1.0
@@ -348,9 +355,9 @@ class TestCorrelationNotes:
 
         corr = rolling_correlation(
             {
-                "EURUSD": list(np.linspace(1, 1.1, 60)),
-                "GBPUSD": list(np.linspace(1, 1.1, 60)),
-                "USDJPY": list(np.linspace(150, 140, 60)),
+                "EURUSD": _ts(list(np.linspace(1, 1.1, 60))),
+                "GBPUSD": _ts(list(np.linspace(1, 1.1, 60))),
+                "USDJPY": _ts(list(np.linspace(150, 140, 60))),
             }
         )
         notes = build_currency_notes(corr, "EURUSD")

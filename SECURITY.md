@@ -8,8 +8,7 @@ The following rules are enforced by the architecture and reviewed in every PR:
 1. **Secrets never live in code, config files, logs, exports, or debug bundles.**
    - MT5 login / password / server: stored only in the **Windows Credential Manager**
      (via the `keyring` package), never in plaintext files.
-   - Supabase: only the **anon key** is configured in the app (protected by Row Level
-     Security). The `service_role` key must never be placed in the app.
+   - Supabase: only the **anon key** is used in the app, authenticated via Supabase Auth with Row Level Security (RLS) policies enforced on every table. The `service_role` key is never shipped in the app, never committed, and never required for client operation. CI verifies that `service_role` does not appear in `app/`.
    - LLM API keys (optional feature): stored in the OS keyring, never sent anywhere
      except the user-configured OpenAI-compatible endpoint.
 2. **Redaction.** A log redaction filter masks known secret fields

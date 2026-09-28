@@ -8,6 +8,7 @@ theme manager for icon theming.
 
 from __future__ import annotations
 
+import contextlib
 from functools import partial
 from typing import Any
 
@@ -194,8 +195,91 @@ class MainWindow(QMainWindow):
         qs.sync()
 
     def closeEvent(self, event: Any) -> None:
-        """Persist window geometry before closing."""
+        """Persist geometry and stop/await owned QThread workers.
+
+        Quitting while a parentless QThread runs would abort with
+        "QThread destroyed while running" (qFatal) — the connect worker
+        alone can wait up to 90 s on a cold terminal start. QThread.quit()
+        only exits an event loop and does not interrupt a blocking
+        gateway.wait_for_result() call, so we cooperatively interrupt,
+        disconnect signals, and detach still-running threads.
+        """
         self._persist_window()
+        # Keep references to threads that are still running after timeout so
+        # the QThread object is not destroyed while the OS thread is alive.
+        closing_workers: list[Any] = getattr(self, "_closing_workers", [])
+        # Ensure attribute exists for future closeEvents
+        self._closing_workers = closing_workers
+        settings_page = self._pages.get("settings")
+        if settings_page is not None:
+            for attr in ("_connect_worker", "_update_worker", "_elevation_worker"):
+                worker = getattr(settings_page, attr, None)
+                if worker is not None:
+                    try:
+                        # Try to unblock a blocking gateway call
+                        gateway = (
+                            getattr(worker, "_gateway", None)
+                            or getattr(worker, "_shared_gateway", None)
+                            or getattr(worker, "gateway", None)
+                        )
+                        if gateway is not None:
+                            for meth in ("cancel", "disconnect", "close", "interrupt"):
+                                if hasattr(gateway, meth):
+                                    with contextlib.suppress(Exception):
+                                        getattr(gateway, meth)()
+                                    break
+                        with contextlib.suppress(Exception):
+                            worker.requestInterruption()
+                        with contextlib.suppress(Exception):
+                            worker.blockSignals(True)
+                        for sig_name in (
+                            "result_ready",
+                            "check_finished",
+                            "stage_finished",
+                            "progress",
+                            "start_result",
+                        ):
+                            sig = getattr(worker, sig_name, None)
+                            if sig is not None:
+                                with contextlib.suppress(Exception):
+                                    sig.disconnect()
+                        with contextlib.suppress(Exception):
+                            worker.finished.disconnect()
+                        worker.quit()
+                        if worker.wait(3000):
+                            with contextlib.suppress(RuntimeError):
+                                worker.deleteLater()
+                        else:
+                            with contextlib.suppress(Exception):
+                                worker.setParent(None)
+                            with contextlib.suppress(Exception):
+                                worker.finished.connect(worker.deleteLater)
+                            closing_workers.append(worker)
+                    except RuntimeError:
+                        pass  # already gone
+                    setattr(settings_page, attr, None)
+        startup_worker = getattr(self, "_startup_update_worker", None)
+        if startup_worker is not None:
+            try:
+                with contextlib.suppress(Exception):
+                    startup_worker.requestInterruption()
+                with contextlib.suppress(Exception):
+                    startup_worker.blockSignals(True)
+                with contextlib.suppress(Exception):
+                    startup_worker.finished.disconnect()
+                startup_worker.quit()
+                if startup_worker.wait(3000):
+                    with contextlib.suppress(RuntimeError):
+                        startup_worker.deleteLater()
+                else:
+                    with contextlib.suppress(Exception):
+                        startup_worker.setParent(None)
+                    with contextlib.suppress(Exception):
+                        startup_worker.finished.connect(startup_worker.deleteLater)
+                    closing_workers.append(startup_worker)
+            except RuntimeError:
+                pass
+            self._startup_update_worker = None
         super().closeEvent(event)
 
     # -- internals ---------------------------------------------------------------
@@ -256,7 +340,13 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(self._translator.translate("app.title"))
         app = QApplication.instance()
         if isinstance(app, QApplication):
-            app.setLayoutDirection(self._translator.layout_direction())
+            direction = self._translator.layout_direction()
+            app.setLayoutDirection(direction)
+            # Regenerate QSS so physical border sides mirror under RTL.
+            self._theme_manager.apply(rtl=direction == Qt.LayoutDirection.RightToLeft)
+            # The window title updates above, but the platform display name
+            # (taskbar grouping) kept the previous language all session.
+            app.setApplicationDisplayName(self._translator.translate("app.title"))
 
     def _quit(self) -> None:
         self.close()

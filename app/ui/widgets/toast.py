@@ -66,6 +66,7 @@ class ToastCard(QFrame):
         self._variant = variant
         self._theme = theme
         self._timer: QTimer | None = None
+        self._remaining_ms = TOAST_MS
 
         row = QHBoxLayout(self)
         row.setContentsMargins(14, 12, 12, 12)
@@ -98,6 +99,7 @@ class ToastCard(QFrame):
             self._timer = QTimer(self)
             self._timer.setSingleShot(True)
             self._timer.timeout.connect(lambda: self.closed.emit(self))
+        self._remaining_ms = ms
         self._timer.start(ms)
 
     def _apply_theme(self, theme: ThemeTokens | None) -> None:
@@ -112,13 +114,15 @@ class ToastCard(QFrame):
         """Pause auto-dismiss while hovered."""
         super().enterEvent(event)
         if self._timer is not None:
+            self._remaining_ms = max(0, self._timer.remainingTime())
             self._timer.stop()
 
     def leaveEvent(self, event: Any) -> None:
-        """Resume auto-dismiss on leave."""
+        """Resume auto-dismiss with the REMAINING time (not a fresh full
+        countdown — repeated hovering could keep a toast alive forever)."""
         super().leaveEvent(event)
         if self._timer is not None:
-            self._timer.start()
+            self._timer.start(self._remaining_ms)
 
 
 class ToastHost(QWidget):
@@ -184,6 +188,11 @@ class ToastHost(QWidget):
         return self._window.width() - TOAST_MARGIN - width
 
     def _relayout(self) -> None:
+        # The host is a plain child widget: without an explicit geometry it
+        # defaults to 100x30 and Qt CLIPS the toast cards (positioned at
+        # window.width()-358) almost entirely out of view — every toast in
+        # the app was invisible (runtime-verified).
+        self.setGeometry(self._window.rect())
         y = TOAST_MARGIN
         for card in reversed(self._cards):
             card.adjustSize()
@@ -198,4 +207,7 @@ class ToastHost(QWidget):
         anim.setDuration(FADE_MS)
         anim.setStartValue(0.0)
         anim.setEndValue(1.0)
+        anim.finished.connect(  # drop the effect's render path when done
+            lambda: card.setGraphicsEffect(None)  # type: ignore[arg-type]
+        )
         anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)

@@ -20,6 +20,7 @@ class ThemeManager(QObject):
         super().__init__(parent)
         self._settings = settings
         self._name = settings.theme
+        self._rtl = False
 
     @property
     def current(self) -> str:
@@ -48,8 +49,15 @@ class ThemeManager(QObject):
         other = "light" if self._name == "dark" else "dark"
         self.set_theme(other)
 
-    def apply(self) -> None:
-        """(Re)apply the current theme's stylesheet to the application."""
+    def apply(self, *, rtl: bool | None = None) -> None:
+        """(Re)apply the current theme's stylesheet to the application.
+
+        ``rtl`` mirrors the physical border sides in the generated QSS
+        (QSS borders do NOT mirror automatically under RTL layout). When
+        omitted, the current default is kept.
+        """
+        if rtl is not None:
+            self._rtl = rtl
         app = QApplication.instance()
         if isinstance(app, QApplication):
-            app.setStyleSheet(build_qss(self.tokens))
+            app.setStyleSheet(build_qss(self.tokens, rtl=self._rtl))

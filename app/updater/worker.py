@@ -83,8 +83,9 @@ class ElevateWorker(QThread):
     previously meant a silently aborted install.
     """
 
-    #: (started, error_message)
-    started = Signal(bool, str)
+    #: (started, error_message) — NOT the inherited QThread.started
+    #: (which carries no args); renamed to avoid shadowing it.
+    start_result = Signal(bool, str)
 
     def __init__(self, command: list[str], parent: Any = None) -> None:
         super().__init__(parent)
@@ -125,7 +126,7 @@ class ElevateWorker(QThread):
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             log.warning("updates: elevation spawn failed: {}", repr(exc))
-            self.started.emit(False, str(exc))
+            self.start_result.emit(False, str(exc))
             return
         ok = completed.returncode == 0
         if not ok:
@@ -133,4 +134,4 @@ class ElevateWorker(QThread):
                 "updates: elevation declined or failed (exit {})",
                 completed.returncode,
             )
-        self.started.emit(ok, "" if ok else f"exit {completed.returncode}")
+        self.start_result.emit(ok, "" if ok else f"exit {completed.returncode}")

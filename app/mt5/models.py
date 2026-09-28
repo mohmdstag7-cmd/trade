@@ -12,6 +12,7 @@ missing on a future build defaults via ``getattr`` conversions in
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -118,7 +119,9 @@ class SymbolSnapshot:
     trade_tick_size: float
     trade_contract_size: float
     currency_profit: str
-    #: Fill-policy bitmask from the broker (1 = FOK, 2 = IOC, 4 = RETURN).
+    #: Fill-policy bitmask from the broker (1 = FOK, 2 = IOC). RETURN
+    #: availability is governed by the symbol's execution mode, not this
+    #: bitmask — see ``SYMBOL_FILLING_MODE`` in the MT5 docs.
     fill_mode: int = 0
 
 
@@ -266,4 +269,20 @@ class GatewayStats:
     commands_failed: int = 0
     reconnects: int = 0
     last_latency_ms: float = 0.0
-    state_history: list[str] = field(default_factory=list)
+    #: Bounded so a 24/7 reconnect storm cannot grow it forever.
+    state_history: deque[str] = field(default_factory=lambda: deque(maxlen=100))
+
+
+@dataclass(frozen=True, slots=True)
+class FillingConstants:
+    """Order constants captured from the MT5 module on the worker thread.
+
+    Lets CLI tools (demo trade test) build request dicts without touching
+    the private module object from a foreign thread.
+    """
+
+    trade_action_deal: int = 1
+    order_time_gtc: int = 0
+    order_filling_fok: int = 0
+    order_filling_ioc: int = 1
+    order_filling_return: int = 2

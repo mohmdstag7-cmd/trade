@@ -21,6 +21,7 @@ structure of this module.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as _dt
 import importlib
 import json
@@ -194,7 +195,20 @@ def _resolve_password(args: argparse.Namespace, login: int, *, quiet: bool = Fal
     if args.password_stdin:
         if not quiet:
             print("Paste the account password and press Enter:")
-        return sys.stdin.readline().rstrip("\r\n")
+        # getpass() disables echo — a plain readline() would leave the
+        # broker password in the terminal scrollback (screen shares,
+        # shell transcripts). getpass's no-TTY fallback warns about echo
+        # (harmless for piped input) — keep pytest's warning-as-error and
+        # real terminals happy by suppressing it locally.
+        import getpass
+        import warnings
+
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                return getpass.getpass("")
+        except (OSError, ValueError):  # no /dev/tty at all
+            return sys.stdin.readline().rstrip("\r\n")
     if not quiet:
         print(
             "No password available. Either save it once via the app Settings page "
@@ -353,7 +367,7 @@ def run_db_check(args: argparse.Namespace) -> int:
     return 0 if stats["integrity_ok"] else 1
 
 
-def _build_market_service(bus: Any) -> tuple[Any, Any | None]:
+def _build_market_service(bus: Any) -> tuple[Any, Any | None, Any | None]:
     """Create the Phase 5 market analysis service (gateway optional).
 
     One long-lived gateway is owned by the app shell and shared with the
@@ -370,9 +384,17 @@ def _build_market_service(bus: Any) -> tuple[Any, Any | None]:
     from app.calendar.events import EventStore
     from app.calendar.importer import ExporterFilePoller
     from app.mt5.gateway import MT5Gateway
+    from app.observability.watchdog import Watchdog
 
     def _mirror_state(state: Any) -> None:
         bus.gateway_state_changed.emit(state.value, "")
+
+    # Watchdog sees the gateway's heartbeat (SPEC E3.9): every worker-loop
+    # iteration beats; 90 s of silence (well above any single 30 s terminal
+    # call) means the thread froze or died. Restart is log-only for now —
+    # respawning the terminal session is a Phase 13 concern.
+    watchdog = Watchdog(check_interval_s=5.0)
+    watchdog.start()
 
     gateway: MT5Gateway | None = None
     try:
@@ -380,9 +402,17 @@ def _build_market_service(bus: Any) -> tuple[Any, Any | None]:
             mt5_factory=_import_mt5,
             request_timeout_s=30.0,
             on_state_change=_mirror_state,
+            heartbeat=watchdog.heartbeat_factory("mt5-gateway"),
             name="shared",
         )
         gateway.start()
+
+        def _on_gateway_stall(name: str) -> None:
+            import loguru
+
+            loguru.logger.warning("watchdog: {} stalled — manual restart required (Phase 13)", name)
+
+        watchdog.register("mt5-gateway", timeout_s=90.0, restart=_on_gateway_stall)
     except Exception:  # pragma: no cover - never block startup on MT5
         import loguru
 
@@ -394,16 +424,20 @@ def _build_market_service(bus: Any) -> tuple[Any, Any | None]:
     store = EventStore(calendar_dir / "events.csv")
     poller = ExporterFilePoller(store, calendar_dir / "exporter.csv", interval_s=300.0)
     clock = BrokerClock(utc_now_fn=_time.time)
-    return MarketAnalysisService(
+    return (
+        MarketAnalysisService(
+            gateway,
+            watched=("EURUSD", "GBPUSD", "XAUUSD"),
+            clock=clock,
+            calendar_store=store,
+            calendar_poller=poller,
+        ),
         gateway,
-        watched=("EURUSD", "GBPUSD", "XAUUSD"),
-        clock=clock,
-        calendar_store=store,
-        calendar_poller=poller,
-    ), gateway
+        watchdog,
+    )
 
 
-def _maybe_auto_connect(gateway: Any, bus: Any) -> None:
+def _maybe_auto_connect(gateway: Any, bus: Any, window: Any | None = None) -> None:
     """Connect at startup when the account is configured and allowed to."""
     from app.core.settings import Mt5AccountSettings
     from app.mt5.credentials import CredentialStore, CredentialStoreError
@@ -435,38 +469,25 @@ def _maybe_auto_connect(gateway: Any, bus: Any) -> None:
             loguru.logger.warning("startup: auto-connect failed: {}", detail)
         bus.gateway_state_changed.emit("connected" if ok else "disconnected", detail)
 
-    worker = ConnectWorker(gateway, request)
+    # Parent to the window so the thread is not GC'd while running and is
+    # cleaned up with the window. Fall back to unparented if the worker
+    # does not accept a parent argument (test fakes).
+    parent = window if window is not None else None
+    try:
+        worker = ConnectWorker(gateway, request, parent=parent)
+    except TypeError:
+        worker = ConnectWorker(gateway, request)
+        if parent is not None:
+            with contextlib.suppress(Exception):
+                worker.setParent(parent)
     worker.result_ready.connect(_on_result)
     worker.start()
-    # keep a module-level reference so the thread is not garbage collected
+    # Store on the window for closeEvent cleanup and keep a module-level
+    # reference as a fallback so the thread is not garbage collected if
+    # the window is not available (e.g. tests).
+    if window is not None:
+        window._auto_connect_worker = worker
     _maybe_auto_connect._worker = worker  # type: ignore[attr-defined]
-
-
-def _install_qt_message_filter() -> None:
-    """Route Qt messages to loguru; drop known third-party noise.
-
-    pyqtgraph connects to ``QStyleHints.colorSchemeChanged`` with a
-    UniqueConnection to a plain function, which Qt 6 logs as a warning
-    on every import. The message is harmless — we swallow exactly that
-    text and forward everything else.
-    """
-    from PySide6.QtCore import QtMsgType, qInstallMessageHandler
-
-    def _handler(mode: Any, context: Any, message: str) -> None:
-        import loguru
-
-        if "unique connections require a pointer to member function" in message:
-            return
-        if mode == QtMsgType.QtWarningMsg:
-            loguru.logger.warning("qt: {}", message)
-        elif mode == QtMsgType.QtCriticalMsg:
-            loguru.logger.error("qt: {}", message)
-        elif mode == QtMsgType.QtFatalMsg:
-            loguru.logger.critical("qt: {}", message)
-        else:
-            loguru.logger.debug("qt: {}", message)
-
-    qInstallMessageHandler(_handler)
 
 
 def run_gui(debug: bool = False) -> int:
@@ -507,7 +528,27 @@ def run_gui(debug: bool = False) -> int:
     qt_app.setApplicationName("MT5 Trading Workstation")
     qt_app.setOrganizationName("MT5TradingWorkstation")
     qt_app.setStyle("Fusion")
-    _install_qt_message_filter()
+
+    # Single-instance guard: two concurrent instances would duplicate
+    # auto-connects, pollers and DB access — and both could stage updates
+    # whose helpers race the same install tree.
+    from PySide6.QtCore import QLockFile
+
+    data_dir = default_data_dir()
+    data_dir.mkdir(parents=True, exist_ok=True)
+    lock = QLockFile(str(data_dir / "app.lock"))
+    if not lock.tryLock(0):
+        import loguru
+
+        loguru.logger.error("app: another instance is already running (lock held) — exiting")
+        print("MT5 Trading Workstation is already running.")
+        shutdown_logging()
+        return 2
+
+    # Qt messages (warnings/criticals/fatals) are routed by the crash
+    # handler's Qt hook, installed above — including the pyqtgraph noise
+    # drop and the QtFatalMsg → crash-report path. No second handler here:
+    # installing one would silently replace (and kill) the report path.
 
     settings = UiSettings.load()
     translator = Translator(settings)
@@ -538,7 +579,7 @@ def run_gui(debug: bool = False) -> int:
     # Market analysis (Phase 5): the gateway is optional — the page shows an
     # offline empty state until the user connects (Settings → Connect, or
     # the Phase 6 auto-connect with saved credentials).
-    market_service, shared_gateway = _build_market_service(bus)
+    market_service, shared_gateway, watchdog = _build_market_service(bus)
 
     def _reset_market_on_disconnect(state: str, _detail: str) -> None:
         # A reconnect may land on a different broker account with different
@@ -565,21 +606,55 @@ def run_gui(debug: bool = False) -> int:
         market_analysis=market_service,
         shared_gateway=shared_gateway,
     )
+    # Ensure the auto-connect worker is cleaned up when the window closes:
+    # patch closeEvent to quit/wait the worker so it cannot emit
+    # gateway_state_changed after shutdown or leak a thread when a second
+    # auto-connect overwrites the reference.
+    _orig_close_event = window.closeEvent
+
+    def _patched_close_event(event: Any) -> None:
+        for attr in ("_auto_connect_worker", "_startup_update_worker"):
+            worker = getattr(window, attr, None)
+            if worker is not None:
+                with contextlib.suppress(Exception):
+                    if hasattr(worker, "quit"):
+                        worker.quit()
+                    if hasattr(worker, "wait"):
+                        worker.wait(2000)
+        # Fallback: module-level reference from _maybe_auto_connect
+        with contextlib.suppress(Exception):
+            mod_worker = getattr(_maybe_auto_connect, "_worker", None)
+            if mod_worker is not None and mod_worker is not getattr(
+                window, "_auto_connect_worker", None
+            ):
+                if hasattr(mod_worker, "quit"):
+                    mod_worker.quit()
+                if hasattr(mod_worker, "wait"):
+                    mod_worker.wait(2000)
+        return _orig_close_event(event)
+
+    window.closeEvent = _patched_close_event  # type: ignore[method-assign]
     window.show()
 
     # Phase 6 conveniences: reconnect automatically, then ask for updates —
     # both after the window is visible so startup stays snappy.
-    QTimer.singleShot(1500, lambda: _maybe_auto_connect(shared_gateway, bus))
+    QTimer.singleShot(1500, lambda: _maybe_auto_connect(shared_gateway, bus, window))
     QTimer.singleShot(2000, lambda: _resume_pending_update(window))
     if load_check_updates():
         QTimer.singleShot(4000, lambda: _startup_update_check(window))
 
     exit_code = qt_app.exec()
 
-    if storage is not None:
-        storage.audit.app_stopped(__version__)
-        storage.close()
-    shutdown_logging()
+    try:
+        if storage is not None:
+            with contextlib.suppress(Exception):
+                storage.audit.app_stopped(__version__)
+            storage.close()
+    finally:
+        with contextlib.suppress(Exception):
+            if watchdog is not None:
+                watchdog.stop()
+        shutdown_logging()
     return exit_code
 
 

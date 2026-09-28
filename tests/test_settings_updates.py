@@ -280,9 +280,9 @@ class TestRestartAndInstall:
                 pass
 
         class _FakeElevateWorker:
-            def __init__(self, command: list[str]) -> None:
+            def __init__(self, command: list[str], parent: object = None) -> None:
                 received.append(command)
-                self.started = _FakeSignal()
+                self.start_result = _FakeSignal()
 
             def start(self) -> None:
                 pass
@@ -351,6 +351,6 @@ class TestElevateWorkerScript:
         monkeypatch.setattr("app.updater.worker.subprocess.run", boom)
         worker = ElevateWorker(["exe", "--apply-update"])
         results: list[tuple[bool, str]] = []
-        worker.started.connect(lambda ok, err: results.append((ok, err)))
+        worker.start_result.connect(lambda ok, err: results.append((ok, err)))
         worker.run()
         assert results == [(False, "powershell missing on this platform")]

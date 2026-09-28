@@ -23,8 +23,10 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any, cast
 
 from app.observability.logger import get_logger
+from app.observability.masking import mask_text
 from app.storage.db import Database
 from app.storage.mirror import MirrorError, MirrorSink
 from app.storage.repositories import OutboxRepository, now_iso
@@ -131,12 +133,24 @@ class OutboxWorker:
         return self._thread is not None and self._thread.is_alive()
 
     # -- flushing ---------------------------------------------------------------
+    def _in_cooldown(self) -> bool:
+        with self._lock:
+            return self._monotonic() < self._cooldown_until
+
     def flush_once(self) -> int:
         """Claim one batch and push it to the mirror. Returns pushed count.
 
         Synchronous on purpose: the worker thread calls this, tests call
         it directly, and ``--db-check`` uses it for a one-shot drain.
+
+        Failures are isolated PER TABLE: one persistently failing table
+        (e.g. a schema drift on ``mt5_requests``) must not bump the retry
+        budget of unrelated tables whose upserts actually succeed —
+        previously healthy rows could be parked ``dead`` by someone
+        else's error.
         """
+        if self._in_cooldown():
+            return 0  # honor the global cooldown on the one-shot path too
         claimed = self._repo.claim_batch(self._config.batch_size)
         if not claimed:
             return 0
@@ -151,25 +165,36 @@ class OutboxWorker:
             except (TypeError, ValueError) as exc:
                 self._poison(entry_id, f"unreadable payload: {exc}")
                 continue
-            by_table.setdefault(table, []).append(payload)
+            entry["payload"] = payload  # parsed payload for the upsert
+            by_table.setdefault(table, []).append(entry)
             valid_entries.append(entry)
 
-        try:
-            for table, rows in by_table.items():
+        synced_ids: list[str] = []
+        pushed = 0
+        for table, entries in by_table.items():
+            rows = cast("list[dict[str, Any]]", [e["payload"] for e in entries])
+            try:
                 self._sink.upsert(table, rows)
-        except MirrorError as exc:
-            self._handle_mirror_error(exc, valid_entries)
-            return 0
-        except Exception as exc:  # unexpected sink bug — treat as transient
-            log.opt(exception=True).warning("storage: mirror sink crashed: {}", exc)
-            self._handle_mirror_error(MirrorError(str(exc), "network"), valid_entries)
-            return 0
+            except MirrorError as exc:
+                self._handle_mirror_error(exc, entries)
+                continue
+            except Exception as exc:  # unexpected sink bug — treat as transient
+                log.opt(exception=True).warning(
+                    "storage: mirror sink crashed on table {}: {}", table, mask_text(str(exc))
+                )
+                self._handle_mirror_error(MirrorError(mask_text(str(exc)), "network"), entries)
+                continue
+            synced_ids.extend(str(e["id"]) for e in entries)
+            pushed += len(entries)
 
-        with self._lock:
-            self._last_error = None
-        self._repo.mark_synced([str(e["id"]) for e in valid_entries])
-        log.debug("storage: synced {} row(s) to the mirror", len(valid_entries))
-        return len(valid_entries)
+        if synced_ids:
+            self._repo.mark_synced(synced_ids)
+        if pushed and len(synced_ids) == len(valid_entries):
+            with self._lock:
+                self._last_error = None
+        if pushed:
+            log.debug("storage: synced {} row(s) to the mirror", pushed)
+        return pushed
 
     def flush_all(self, *, max_batches: int = 100) -> int:
         """Drain every due entry (batch after batch). Returns total rows."""
@@ -187,6 +212,9 @@ class OutboxWorker:
     def snapshot(self, *, enabled: bool = True) -> SyncStatus:
         """Current status for the UI (cheap queries, no network)."""
         counts = self._repo.counts()
+        with self._lock:
+            last_error = self._last_error
+            cooldown_until = self._cooldown_until
         now = self._monotonic()
         return SyncStatus(
             running=self.running,
@@ -196,8 +224,8 @@ class OutboxWorker:
             synced=counts.get("synced", 0),
             dead=counts.get("dead", 0),
             last_synced_at=self._repo.last_synced_at(),
-            last_error=self._last_error,
-            cooldown_remaining_s=max(0.0, self._cooldown_until - now),
+            last_error=last_error,
+            cooldown_remaining_s=max(0.0, cooldown_until - now),
         )
 
     # -- internals -----------------------------------------------------------------
@@ -211,17 +239,24 @@ class OutboxWorker:
         exc: MirrorError,
         claimed: list[dict[str, object]],
     ) -> None:
-        """Classify the failure: cooldown, per-row backoff, or dead."""
+        """Classify the failure: cooldown, per-row backoff, or dead.
+
+        Only the entries of the FAILED request are passed in — the retry
+        budget of healthy rows must never be consumed by someone else's
+        error. The error text is masked before it reaches status/UI.
+        """
+        masked = mask_text(str(exc))
         with self._lock:
-            self._last_error = str(exc)
+            self._last_error = masked
         if exc.kind in ("auth", "server"):
             # Paused project or rejected key: back off globally.
-            self._cooldown_until = self._monotonic() + self._config.cooldown_s
-            log.warning("storage: mirror cooldown {}s ({})", self._config.cooldown_s, exc)
+            with self._lock:
+                self._cooldown_until = self._monotonic() + self._config.cooldown_s
+            log.warning("storage: mirror cooldown {}s ({})", self._config.cooldown_s, masked)
         for entry in claimed:
             entry_id = str(entry["id"])
             attempts = int(str(entry["attempts"])) + 1
-            error_text = str(exc)
+            error_text = masked
             if attempts >= self._config.max_attempts:
                 self._repo.mark_dead(entry_id, error_text)
                 log.error("storage: outbox entry dead after {} attempts", attempts)
@@ -257,12 +292,18 @@ class OutboxWorker:
     def _loop(self) -> None:
         """Periodic flush with a 1 s scheduling granularity."""
         next_flush = self._monotonic()
-        while not self._stop_event.wait(1.0):
-            now = self._monotonic()
-            if now < next_flush or now < self._cooldown_until:
-                continue
-            try:
-                self.flush_once()
-            except Exception:  # pragma: no cover - flush_once catches everything
-                log.opt(exception=True).error("storage: outbox loop error")
-            next_flush = self._monotonic() + self._config.flush_interval_s
+        try:
+            while not self._stop_event.wait(1.0):
+                now = self._monotonic()
+                with self._lock:
+                    cooldown_until = self._cooldown_until
+                if now < next_flush or now < cooldown_until:
+                    continue
+                try:
+                    self.flush_once()
+                except Exception:  # pragma: no cover - flush_once catches everything
+                    log.opt(exception=True).error("storage: outbox loop error")
+                next_flush = self._monotonic() + self._config.flush_interval_s
+        finally:
+            # sqlite connections are thread-bound: close our own on exit
+            self._db.close_thread_connection()

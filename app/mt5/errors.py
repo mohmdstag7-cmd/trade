@@ -230,12 +230,16 @@ class TradeError(MT5Error):
         super().__init__(code, description, detail=detail)
 
 
-class InvalidSymbolError(MT5Error):
-    """The requested symbol does not exist on this broker."""
+class InvalidSymbolError(TerminalError):
+    """The requested symbol does not exist on this broker.
 
-    def __init__(self, symbol: str) -> None:
+    Terminal-classed so legacy ``except TerminalError`` handlers keep
+    working; keeps ``symbol`` for log-friendly rendering.
+    """
+
+    def __init__(self, symbol: str, *, code: int = 0, description: str = "") -> None:
         self.symbol = symbol
-        super().__init__(code=0, description=f"symbol not found: {symbol}")
+        super().__init__(code, description or f"symbol not found on this broker: {symbol}")
 
 
 class GatewayTimeoutError(MT5Error):
@@ -274,6 +278,23 @@ def raise_for_order_result(result: Any, module: Any) -> None:
     """
     code = _result_code(result)
     if code in (RETCODE_DONE, RETCODE_PLACED, RETCODE_DONE_PARTIAL):
+        return
+    raw = _result_comment(result) or _last_error_text(module)
+    ambiguous = code in AMBIGUOUS_RETCODES
+    raise TradeError(code, raw, ambiguous=ambiguous)
+
+
+def raise_for_check_result(result: Any, module: Any) -> None:
+    """Raise :class:`TradeError` unless an ``order_check`` result passes.
+
+    ``order_check`` mirrors ``MqlTradeCheckResult``, whose success is
+    commonly reported with retcode ``0`` ("check passed") rather than the
+    ``TRADE_RETCODE_*`` values ``order_send`` returns. Accept both so a
+    valid order is not rejected on real terminals (the exact retcode for
+    success varies by build/broker — 0 and 10009 are both observed).
+    """
+    code = _result_code(result)
+    if code in (0, RETCODE_DONE, RETCODE_PLACED, RETCODE_DONE_PARTIAL):
         return
     raw = _result_comment(result) or _last_error_text(module)
     ambiguous = code in AMBIGUOUS_RETCODES

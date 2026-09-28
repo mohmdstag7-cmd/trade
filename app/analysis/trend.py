@@ -99,6 +99,8 @@ def assess_timeframe(bars: list[RateBar], timeframe: Timeframe) -> TrendVector |
             reasons.append(f"{REASON_PREFIX}.adx_trending")
             if plus_di[-1] > minus_di[-1] and direction >= 0:
                 reasons.append(f"{REASON_PREFIX}.di_bulls")
+                if direction == 0:
+                    direction = 1  # symmetric with the bearish flip below
             elif minus_di[-1] > plus_di[-1] and direction <= 0:
                 reasons.append(f"{REASON_PREFIX}.di_bears")
                 if direction == 0:

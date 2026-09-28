@@ -56,12 +56,26 @@ def _card() -> QFrame:
 
 
 def _clear_layout(layout: QLayout) -> None:
-    """Remove (and delete) all widgets in a layout."""
+    """Remove (and delete) all widgets AND sub-layouts in a layout.
+
+    Sub-layouts previously survived the sweep: their child widgets stayed
+    alive (visible, overlapping duplicates) and leaked on every re-render
+    of the trend matrix (runtime-verified).
+    """
     while layout.count():
         item = layout.takeAt(0)
-        widget = item.widget() if item is not None else None
+        if item is None:
+            continue
+        widget = item.widget()
         if widget is not None:
             widget.deleteLater()
+        sub = item.layout()
+        if sub is not None:
+            _clear_layout(sub)
+            sub.deleteLater()
+        spacer = item.spacerItem()
+        if spacer is not None:
+            layout.removeItem(spacer)
 
 
 def _card_title(text: str) -> QLabel:
@@ -206,6 +220,13 @@ class MarketPage(QWidget):
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setInterval(REFRESH_MS)
         self._refresh_timer.timeout.connect(self._refresh)
+        # Start immediately when a service was injected via the constructor
+        # (the app shell path). Previously the timers ONLY started in
+        # set_service(), which production never called — the page rendered
+        # once at construction and stayed frozen forever.
+        if service is not None:
+            self._poll_timer.start()
+            self._refresh_timer.start()
 
         translator.language_changed.connect(lambda _lang: self.retranslate())
         self._theme.theme_changed.connect(lambda _name: self._apply_theme())
@@ -214,12 +235,14 @@ class MarketPage(QWidget):
 
     # -- public ------------------------------------------------------------------
     def set_service(self, service: MarketAnalysisService | None) -> None:
-        """Attach the analysis service (called by main once built)."""
+        """Attach (or replace) the analysis service and sync the timers."""
         self._service = service
         self._refresh()
         if service is not None:
-            self._poll_timer.start()
-            self._refresh_timer.start()
+            if not self._poll_timer.isActive():
+                self._poll_timer.start()
+            if not self._refresh_timer.isActive():
+                self._refresh_timer.start()
         else:
             self._poll_timer.stop()
             self._refresh_timer.stop()
@@ -367,7 +390,10 @@ class MarketPage(QWidget):
             self._calendar_layout.addWidget(note)
             return
         minutes = event.minutes_until
-        if minutes >= 60:
+        if minutes < 0:
+            # Event already started (stale snapshot) — don't render "in -5 min".
+            when = tr("market.calendar.now")
+        elif minutes >= 60:
             when = tr("market.calendar.hours", hours=minutes // 60, minutes=minutes % 60)
         else:
             when = tr("market.calendar.minutes", minutes=minutes)
@@ -398,8 +424,18 @@ class MarketPage(QWidget):
         service = self._service
         bars: list = []
         if service is not None:
-            series = service.manager.series(self._symbol, self._timeframe)
-            bars = list(series.bars)[-CHART_BARS:]
+            try:
+                if (
+                    snapshot is not None
+                    and snapshot.unresolved
+                    and self._symbol in snapshot.unresolved
+                ):
+                    bars = []
+                else:
+                    series = service.manager.series(self._symbol, self._timeframe)
+                    bars = list(series.bars)[-CHART_BARS:]
+            except Exception:
+                bars = []
         _ = snapshot, snap
         self._chart.set_data(bars)
 

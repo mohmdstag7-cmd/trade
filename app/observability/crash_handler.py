@@ -22,6 +22,7 @@ import os
 import platform
 import sys
 import threading
+import time
 import traceback
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -35,6 +36,11 @@ from app.observability.masking import mask_text
 
 #: Number of recent log lines embedded in every crash report (SPEC E3.8).
 LAST_LOG_LINES = 200
+
+#: Max crash reports per worker thread within the sliding window (a
+#: crash-looping thread must not fill the disk with report files).
+_THREAD_REPORT_LIMIT = 5
+_THREAD_REPORT_WINDOW_S = 60.0
 
 ReportCallback = Callable[[str, Path], None]
 
@@ -54,6 +60,8 @@ class CrashReporter:
         self._previous_sys_hook = sys.excepthook
         self._previous_threading_hook = threading.excepthook
         self._previous_qt_handler: object | None = None
+        self._thread_report_times: dict[str, list[float]] = {}
+        self._rate_lock = threading.Lock()
 
     # -- installation ------------------------------------------------------
     def install(self) -> None:
@@ -75,6 +83,10 @@ class CrashReporter:
         log.opt(exception=(exc_type, exc_value, exc_tb)).critical(
             "uncaught exception on main thread; report={}", path.name
         )
+        # Deliberately NOT chaining the previous hook: the default hook only
+        # prints the raw (unmasked) traceback to stderr, and a foreign hook
+        # (pytest-qt) treats a chained call as a fresh failure. The masked
+        # report + the critical log line above are the single source of truth.
         if self._on_report is not None:
             self._on_report("sys", path)
 
@@ -83,12 +95,31 @@ class CrashReporter:
         if exc is None:  # pragma: no cover - defensive
             return
         thread_name = args.thread.name if args.thread is not None else "unknown"
+        if not self._thread_report_allowed(thread_name):
+            return  # crash-looping thread — already reported, just rate-limit
         path = self.report("threading", exc, thread_name)
         get_logger("app").critical(
             "uncaught exception in thread {!r}; report={}", thread_name, path.name
         )
+        # Same no-chaining rationale as _sys_hook.
         if self._on_report is not None:
             self._on_report("threading", path)
+
+    def _thread_report_allowed(self, thread_name: str) -> bool:
+        """Sliding-window rate limit so a crash loop cannot fill the disk."""
+        now = time.monotonic()
+        with self._rate_lock:
+            times = [
+                t
+                for t in self._thread_report_times.get(thread_name, ())
+                if now - t < _THREAD_REPORT_WINDOW_S
+            ]
+            if len(times) >= _THREAD_REPORT_LIMIT:
+                self._thread_report_times[thread_name] = times
+                return False
+            times.append(now)
+            self._thread_report_times[thread_name] = times
+            return True
 
     # -- Qt --------------------------------------------------------------------
     def _install_qt_handler(self) -> None:
@@ -114,6 +145,11 @@ class CrashReporter:
             }
             level = level_map.get(QtMsgType(msg_type), "ERROR")
             text = message.decode(errors="replace") if isinstance(message, bytes) else message
+            # Known third-party noise: pyqtgraph connects to
+            # QStyleHints.colorSchemeChanged with a UniqueConnection to a
+            # plain function, which Qt 6 logs as a warning on every import.
+            if "unique connections require a pointer to member function" in text:
+                return
             get_logger("ui").opt(raw=False).log(level, "qt: {}", mask_text(text))
             if msg_type == QtMsgType.QtFatalMsg:
                 reporter.report("qt", RuntimeError(text), threading.current_thread().name)
@@ -132,9 +168,14 @@ class CrashReporter:
                 encoding="utf-8",
             )
         except OSError:  # pragma: no cover - disk full / permissions
-            fallback = self._reports_dir / f"crash_{stamp}_{kind}.txt"
-            fallback.write_text(str(payload.get("stack_trace", "")), encoding="utf-8")
-            path = fallback
+            try:
+                fallback = self._reports_dir / f"crash_{stamp}_{kind}.txt"
+                fallback.write_text(str(payload.get("stack_trace", "")), encoding="utf-8")
+                path = fallback
+            except OSError:
+                # Nowhere to write — keep the in-memory path so callers and
+                # logs still mention a stable (missing) location.
+                pass
         return path
 
     def _build_payload(self, kind: str, exc: BaseException, thread_name: str) -> dict[str, object]:
@@ -153,7 +194,7 @@ class CrashReporter:
             "pid": os.getpid(),
             "session_id": get_session_id(),
             "trace_id": get_trace_id(),
-            "argv": list(sys.argv),
+            "argv": [mask_text(arg) for arg in sys.argv],
             "last_logs": self._last_logs(),
         }
         return payload
