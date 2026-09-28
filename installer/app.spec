@@ -74,12 +74,17 @@ a = Analysis(
 
 pyz = PYZ(a.pure)
 
+# PyInstaller's EXE(version=...) expects a path to a file containing the
+# VSVersionInfo text (or a pre-parsed object) - not the raw text itself.
+_version_file = ROOT / "installer" / "build_version_info.txt"
+_version_file.write_text(_version_info(__version__), encoding="utf-8")
+
 exe = EXE(
     pyz,
     a.scripts,
     exclude_binaries=True,
     name="MT5TradingWorkstation",
-    version=_version_info(__version__),
+    version=str(_version_file),
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
