@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT = Path(SPECPATH).resolve().parent  # repository root
 sys.path.insert(0, str(ROOT))
 
-from app import __version__  # noqa: E402  (kept in sync by tests/test_version)
+from app.__version__ import __version__  # noqa: E402  (kept in sync by tests/test_version)
 
 
 def _version_info(version: str) -> str:
