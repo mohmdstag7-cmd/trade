@@ -3,7 +3,7 @@
 > Updated at the end of every phase (SPEC A5). Decisions are recorded ADR-style:
 > **decision + reason**. For the full product specification see `docs/SPEC.md`.
 
-## Current state: Phase 4 (Storage)
+## Current state: Phase 5.5 (Analysis + Updater + Design System v2) — Phases 1-5.5 merged, round-2 review fixes in progress
 
 ```
 ┌────────────────────────────────────────────────────────────┐
