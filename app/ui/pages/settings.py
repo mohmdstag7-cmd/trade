@@ -12,6 +12,7 @@ import re
 import subprocess
 import sys
 from typing import Any
+from urllib.parse import urlparse
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
@@ -71,6 +72,25 @@ _SERVER_SUSPICIOUS_RE = re.compile(r"[&!@$%^*+=~|<>{}\[\];?`#\"']")
 
 #: Maximum width of the centered settings column.
 COLUMN_WIDTH = 780
+
+
+def _is_valid_cloud_url(url: str) -> bool:
+    """Validate that ``url`` is a well-formed https Supabase URL.
+
+    The UI hint says "Enter your Supabase project URL (https://…supabase.co)"
+    and the service key must never be sent to an attacker-controlled endpoint.
+    We enforce https scheme and a host ending in ``.supabase.co``.
+    """
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme != "https":
+            return False
+        host = parsed.hostname
+        if not host:
+            return False
+        return bool(host == "supabase.co" or host.endswith(".supabase.co"))
+    except Exception:
+        return False
 
 
 def _friendly_update_error(error: str, tr: Any) -> str:
@@ -860,7 +880,7 @@ class SettingsPage(QWidget):
     def _on_save_cloud(self) -> None:
         tr = self._translator.translate
         url = self._cloud_url_edit.text().strip()
-        if not url.startswith("https://"):
+        if not _is_valid_cloud_url(url):
             self._cloud_result_label.setText(tr("settings.cloud.bad_url"))
             return
         key = self._cloud_key_edit.text()
@@ -899,7 +919,7 @@ class SettingsPage(QWidget):
         if self._cloud_probe is not None:  # a test is already running
             return
         url = self._cloud_url_edit.text().strip()
-        if not url.startswith("https://"):
+        if not _is_valid_cloud_url(url):
             self._cloud_result_label.setText(tr("settings.cloud.bad_url"))
             return
         key = self._cloud_key_edit.text()

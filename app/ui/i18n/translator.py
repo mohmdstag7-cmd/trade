@@ -46,7 +46,10 @@ class Translator(QObject):
             return key
         if not kwargs:
             return template
-        return template.format(**kwargs)
+        try:
+            return template.format(**kwargs)
+        except (KeyError, IndexError, ValueError):
+            return template
 
     def set_language(self, language: str) -> None:
         """Switch to ``language`` ("en"/"fa"), persist and notify."""

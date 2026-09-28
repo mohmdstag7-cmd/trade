@@ -424,8 +424,18 @@ class MarketPage(QWidget):
         service = self._service
         bars: list = []
         if service is not None:
-            series = service.manager.series(self._symbol, self._timeframe)
-            bars = list(series.bars)[-CHART_BARS:]
+            try:
+                if (
+                    snapshot is not None
+                    and snapshot.unresolved
+                    and self._symbol in snapshot.unresolved
+                ):
+                    bars = []
+                else:
+                    series = service.manager.series(self._symbol, self._timeframe)
+                    bars = list(series.bars)[-CHART_BARS:]
+            except Exception:
+                bars = []
         _ = snapshot, snap
         self._chart.set_data(bars)
 
