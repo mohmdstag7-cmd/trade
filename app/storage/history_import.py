@@ -40,7 +40,14 @@ class ImportStats:
 def build_trade_row(deal: object) -> dict[str, object]:
     """Convert a closing deal into a trade row (pure, testable)."""
     # The closing deal's side is opposite to the position's direction.
-    direction = "sell" if int(deal.type) == 0 else "buy"  # type: ignore[attr-defined]
+    deal_type = int(getattr(deal, "type", -1))
+    if deal_type == 0:
+        direction = "sell"
+    elif deal_type == 1:
+        direction = "buy"
+    else:
+        msg = f"unexpected deal type {deal_type!r} (expected 0=BUY or 1=SELL)"
+        raise ValueError(msg)
     net = float(deal.profit) + float(deal.commission) + float(deal.swap)  # type: ignore[attr-defined]
     outcome = "win" if net > 0 else "loss" if net < 0 else "breakeven"
     return {
@@ -91,7 +98,12 @@ class HistoryImporter:
             if not deal.closes_position or not deal.symbol or deal.position_id == 0:
                 stats.skipped += 1
                 continue
-            row = build_trade_row(deal)
+            try:
+                row = build_trade_row(deal)
+            except ValueError as exc:
+                log.warning("storage: skipping deal with unexpected type: {}", exc)
+                stats.skipped += 1
+                continue
             if self._repo.import_row(row):
                 stats.imported += 1
             else:

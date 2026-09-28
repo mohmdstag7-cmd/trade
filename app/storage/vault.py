@@ -90,4 +90,7 @@ class KeyringVault:
 
     def has(self, name: str) -> bool:
         """True when a non-empty secret exists (without exposing it)."""
-        return bool(self.get(name))
+        try:
+            return bool(self.get(name))
+        except VaultError:
+            return False

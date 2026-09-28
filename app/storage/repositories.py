@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import uuid
 from collections.abc import Callable
 from typing import Any
@@ -122,8 +123,22 @@ class BaseRepository:
 
     def insert_many(self, rows: list[dict[str, Any]], *, mirror: bool | None = None) -> int:
         """Insert several rows in one transaction; returns the count."""
-        for row in rows:
-            self.insert(row, mirror=mirror)
+        if not rows:
+            return 0
+        should_mirror = self._mirrored if mirror is None else mirror
+        with self._db.transaction():
+            for row in rows:
+                r = dict(row)
+                if not r.get("id"):
+                    r["id"] = new_id()
+                r.setdefault("created_at", now_iso())
+                columns = sorted(r)
+                placeholders = ", ".join("?" for _ in columns)
+                quoted = ", ".join(self._q_ident(c) for c in columns)
+                sql = f"INSERT INTO {self._q_ident(self.table)} ({quoted}) VALUES ({placeholders})"
+                self._db.execute(sql, [r[c] for c in columns])
+                if should_mirror:
+                    OutboxRepository(self._db).enqueue(self.table, str(r["id"]), r)
         return len(rows)
 
     def update(self, row_id: str, changes: dict[str, Any]) -> bool:
@@ -155,8 +170,9 @@ class BaseRepository:
         return self._db.row_count(self.table)
 
     def recent(self, limit: int = 50, order_by: str = "created_at") -> list[dict[str, Any]]:
+        order_col = self._q_ident(order_by)
         rows = self._db.query(
-            f'SELECT * FROM "{self.table}" ORDER BY "{order_by}" DESC LIMIT ?',
+            f'SELECT * FROM "{self.table}" ORDER BY {order_col} DESC LIMIT ?',
             (limit,),
         )
         return [dict(r) for r in rows]
@@ -334,27 +350,31 @@ class TradeRepository(BaseRepository):
         """Idempotent history import: existing ids are never overwritten.
 
         Returns ``True`` only when the row was newly created.
+        Uses INSERT OR IGNORE to handle concurrent duplicate imports safely.
         """
         row = dict(row)
         if not row.get("id"):
             row["id"] = deterministic_id(
                 "trade", str(row.get("ticket", "")), str(row.get("position_id", ""))
             )
-        if self.exists(str(row["id"])):
-            return False
         row.setdefault("source", "import")
         row.setdefault("created_at", now_iso())
 
         columns = sorted(row)
         placeholders = ", ".join("?" for _ in columns)
-        quoted = ", ".join(f'"{c}"' for c in columns)
-        with self._db.transaction():
-            self._db.execute(
-                f"INSERT INTO trades ({quoted}) VALUES ({placeholders})",
-                [row[c] for c in columns],
-            )
-            OutboxRepository(self._db).enqueue("trades", str(row["id"]), row)
-        return True
+        quoted = ", ".join(self._q_ident(c) for c in columns)
+        try:
+            with self._db.transaction():
+                cursor = self._db.execute(
+                    f"INSERT OR IGNORE INTO {self._q_ident(self.table)} ({quoted}) VALUES ({placeholders})",
+                    [row[c] for c in columns],
+                )
+                if cursor.rowcount == 0:
+                    return False
+                OutboxRepository(self._db).enqueue("trades", str(row["id"]), row)
+            return True
+        except sqlite3.IntegrityError:
+            return False
 
 
 class DecisionTraceRepository(BaseRepository):
@@ -489,8 +509,21 @@ class AppLogRepository(BaseRepository):
         super().__init__(db, "app_logs")
 
     def bulk_insert(self, rows: list[dict[str, Any]]) -> int:
-        for row in rows:
-            self.insert(row)
+        if not rows:
+            return 0
+        with self._db.transaction():
+            for row in rows:
+                r = dict(row)
+                if not r.get("id"):
+                    r["id"] = new_id()
+                r.setdefault("created_at", now_iso())
+                columns = sorted(r)
+                placeholders = ", ".join("?" for _ in columns)
+                quoted = ", ".join(self._q_ident(c) for c in columns)
+                sql = f"INSERT INTO {self._q_ident(self.table)} ({quoted}) VALUES ({placeholders})"
+                self._db.execute(sql, [r[c] for c in columns])
+                if self._mirrored:
+                    OutboxRepository(self._db).enqueue(self.table, str(r["id"]), r)
         return len(rows)
 
 

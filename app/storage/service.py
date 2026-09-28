@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import contextlib
 import pathlib
+import threading
 from typing import Any
 
 from loguru import logger
@@ -216,15 +217,27 @@ class StorageService:
     def apply_cloud_config(self) -> bool:
         """Re-evaluate credentials and (re)build the worker accordingly.
 
-        The old worker is stopped WITHOUT an unbounded join: ``stop()``
-        can block up to 5 s while a push is in flight, and this method is
-        called from the UI thread (Save / Remove key). The stopped worker
-        is left to the daemon-thread reaper; upsert idempotency makes a
-        still-draining push harmless.
+        Enforces single-worker invariant: the old worker is joined with a
+        short timeout before the new one starts, preventing two workers
+        from concurrently claiming the same outbox rows. If the old worker
+        does not exit in time, the new worker start is deferred to a
+        background thread after the old thread terminates.
         """
         old_worker = self._worker
         if old_worker is not None:
-            old_worker.stop(timeout_s=0.0)  # signal only — never join here
+            old_worker.stop(timeout_s=2.0)
+            if old_worker.running:
+                log.warning("storage: old outbox worker did not stop in time; deferring new worker")
+
+                def _deferred_start() -> None:
+                    thread = old_worker._thread
+                    if thread is not None:
+                        thread.join(timeout=5.0)
+                    self._worker = OutboxWorker(self._db, self._mirror_sink())
+                    self._worker.start()
+
+                threading.Thread(target=_deferred_start, name="outbox-restart", daemon=True).start()
+                return self._cloud_enabled
         self._worker = OutboxWorker(self._db, self._mirror_sink())
         self._worker.start()
         return self._cloud_enabled

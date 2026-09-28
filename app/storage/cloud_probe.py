@@ -8,6 +8,7 @@ freezes (SPEC C3, I-8).
 
 from __future__ import annotations
 
+import concurrent.futures
 import threading
 from dataclasses import dataclass
 
@@ -59,7 +60,15 @@ class CloudProbe:
     # -- internals -----------------------------------------------------------------
     def _run(self) -> None:
         try:
-            latency_ms = SupabaseMirror(self._url, self._key).probe()
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(SupabaseMirror(self._url, self._key).probe)
+                try:
+                    latency_ms = future.result(timeout=self._timeout_s)
+                except concurrent.futures.TimeoutError:
+                    self._ok = False
+                    self._detail = f"probe timed out after {self._timeout_s:.0f}s"
+                    log.warning("storage: cloud probe timed out")
+                    return
             self._ok = True
             self._detail = f"{latency_ms:.0f} ms"
             log.info("storage: cloud probe OK ({})", self._detail)

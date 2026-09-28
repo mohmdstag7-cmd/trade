@@ -134,7 +134,8 @@ class OutboxWorker:
 
     # -- flushing ---------------------------------------------------------------
     def _in_cooldown(self) -> bool:
-        return self._monotonic() < self._cooldown_until
+        with self._lock:
+            return self._monotonic() < self._cooldown_until
 
     def flush_once(self) -> int:
         """Claim one batch and push it to the mirror. Returns pushed count.
@@ -211,6 +212,9 @@ class OutboxWorker:
     def snapshot(self, *, enabled: bool = True) -> SyncStatus:
         """Current status for the UI (cheap queries, no network)."""
         counts = self._repo.counts()
+        with self._lock:
+            last_error = self._last_error
+            cooldown_until = self._cooldown_until
         now = self._monotonic()
         return SyncStatus(
             running=self.running,
@@ -220,8 +224,8 @@ class OutboxWorker:
             synced=counts.get("synced", 0),
             dead=counts.get("dead", 0),
             last_synced_at=self._repo.last_synced_at(),
-            last_error=self._last_error,
-            cooldown_remaining_s=max(0.0, self._cooldown_until - now),
+            last_error=last_error,
+            cooldown_remaining_s=max(0.0, cooldown_until - now),
         )
 
     # -- internals -----------------------------------------------------------------
@@ -246,7 +250,8 @@ class OutboxWorker:
             self._last_error = masked
         if exc.kind in ("auth", "server"):
             # Paused project or rejected key: back off globally.
-            self._cooldown_until = self._monotonic() + self._config.cooldown_s
+            with self._lock:
+                self._cooldown_until = self._monotonic() + self._config.cooldown_s
             log.warning("storage: mirror cooldown {}s ({})", self._config.cooldown_s, masked)
         for entry in claimed:
             entry_id = str(entry["id"])
@@ -290,7 +295,9 @@ class OutboxWorker:
         try:
             while not self._stop_event.wait(1.0):
                 now = self._monotonic()
-                if now < next_flush or now < self._cooldown_until:
+                with self._lock:
+                    cooldown_until = self._cooldown_until
+                if now < next_flush or now < cooldown_until:
                     continue
                 try:
                     self.flush_once()
@@ -298,5 +305,5 @@ class OutboxWorker:
                     log.opt(exception=True).error("storage: outbox loop error")
                 next_flush = self._monotonic() + self._config.flush_interval_s
         finally:
-            # sqlite connections are thread-bound: the worker closes its own
+            # sqlite connections are thread-bound: close our own on exit
             self._db.close_thread_connection()

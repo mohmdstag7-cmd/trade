@@ -21,6 +21,7 @@ import time
 from typing import Any, Protocol
 
 from app.observability.logger import get_logger
+from app.observability.masking import mask_text
 from app.storage.vault import KeyringVault
 
 log = get_logger("sync")
@@ -175,7 +176,7 @@ class SupabaseMirror:
                 "supabase/schema.sql in your project.",
                 "client",
             )
-        return MirrorError(f"Supabase mirror failed: {text}", "network")
+        return MirrorError(f"Supabase mirror failed: {mask_text(text)}", "network")
 
 
 class NullMirror:

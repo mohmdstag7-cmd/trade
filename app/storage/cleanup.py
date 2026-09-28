@@ -85,12 +85,26 @@ class RetentionService:
         names = self._db.table_names()
         if table not in names:
             return 0
+        # Validate timestamp column exists to avoid silent no-ops
+        cols = {str(r["name"]) for r in self._db.query(f'PRAGMA table_info("{table}")')}
+        if "created_at" not in cols:
+            # Try known alternative timestamp columns
+            for alt in ("event_time", "time", "updated_at", "started_at"):
+                if alt in cols:
+                    cursor = self._db.execute(
+                        f'DELETE FROM "{table}" '
+                        f"WHERE \"{alt}\" < strftime('%Y-%m-%dT%H:%M:%S.%fZ','now', ?)",
+                        (f"-{int(days)} days",),
+                    )
+                    return int(cursor.rowcount)
+            log.warning("storage: cleanup skipped table {} (no timestamp column)", table)
+            return 0
         cursor = self._db.execute(
             f'DELETE FROM "{table}" '
             "WHERE created_at < strftime('%Y-%m-%dT%H:%M:%S.%fZ','now', ?)",
             (f"-{int(days)} days",),
         )
-        return cursor.rowcount
+        return int(cursor.rowcount)
 
 
 class CleanupScheduler:
