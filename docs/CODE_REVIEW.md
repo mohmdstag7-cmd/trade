@@ -10,6 +10,8 @@ This document records the second-round deep review of the full MT5 Trading Works
 | LOW | 8 |
 | **Total** | **52** |
 
+> Note: R2-051 was retracted during remediation (false positive — see its section); 51 findings stand as confirmed. |
+
 ## CRITICAL
 
 ### R2-001 [CRITICAL] Delta staging pre-verification always fails
@@ -268,10 +270,9 @@ This document records the second-round deep review of the full MT5 Trading Works
 - **Problem:** build_qss mirrors borders by replacing 'border-left'->'border-__TMP__'->'border-left' etc. This also replaces occurrences inside comments, URLs, or future token names, and only mirrors 'left: 12px' for QGroupBox titles while leaving other directional paddings (e.g. 'padding: 12px 14px 4px 14px') unmirrored, causing subtle RTL layout asymmetry.
 - **Fix:** Mirror via a proper CSS parser or at least restrict replacements to property names with regex word boundaries, and mirror all directional shorthands or generate RTL QSS from tokens directly.
 
-### R2-051 [LOW] ARCHITECTURE.md stale — still says Phase 4 current state
-- **File:** `docs/ARCHITECTURE.md:6` — **Category:** spec-gap
-- **Problem:** Line 6 header says Current state: Phase 4 (Storage) while PROGRESS.md and CHANGELOG show Phase 5 and 5.5 (UI v2 + updater) merged/in-review at 0.7.2. Stale architecture doc misleads new agents (AGENTS.md says read ARCHITECTURE.md first) about gateway ownership, updater, and market pipeline.
-- **Fix:** Update ARCHITECTURE.md Current state to Phase 5.5, add ADR-0015..0018 already in file to the diagram, and add CI check that PROGRESS.md phase table and ARCHITECTURE.md header stay in sync.
+### R2-051 [RETRACTED] Branch filters reported as corrupted (`branches: ain]`)
+- **Status:** RETRACTED during remediation — false positive.
+- **Explanation:** The original finding claimed five `branches: ain]` filters across the ci/build/codeql/release-please workflows. Byte-level verification (per-character codepoint dumps of both the working tree and `origin/main` via `git show`) proves every filter is the correct literal `branches: [main]` or `branches: ["**"]`. The "corruption" was a terminal-rendering artifact: the `[m` sequence inside `[main]` was swallowed as an ANSI-escape prefix when command output was displayed, visually yielding `ain]`. Lesson recorded: verify YAML byte-level (or with actionlint / git hash-object) before reporting corruption; never trust terminal display of strings containing `[m`.
 
 ### R2-052 [LOW] TrimStart('v') is char-array trim, not prefix trim
 - **File:** `.github/workflows/release.yml:44` — **Category:** bug

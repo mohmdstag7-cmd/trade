@@ -551,9 +551,10 @@ lock file, SHA-pinning actions, `order_check` retcode on real hardware).
 - Fixes applied for CRITICAL + HIGH + safe MEDIUM/LOW findings across:
   storage (atomicity, races, retention safety, RLS-hardened Supabase schema),
   analysis, MT5 gateway, observability, UI, updater, CI and packaging.
-- CI: corrupted `branches: ain]` filters fixed to `[main]` (5 occurrences
-  across 4 workflows), all actions pinned to commit SHAs, pip install
-  hardened with retries/timeouts (2026-09-28 PyPI flake made CI red).
+- CI: all actions pinned to commit SHAs; pip install hardened with
+  retries/timeouts (2026-09-28 PyPI flake made CI red). An earlier
+  suspicion of corrupted `branches:` filters was retracted after
+  byte-level verification (see `docs/CODE_REVIEW.md` R2-051).
 - `uv.lock` added (SPEC D1 lock-file requirement).
 
 ### Deferred
