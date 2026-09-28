@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Versions are managed automatically by [release-please](https://github.com/googleapis/release-please)
 from Conventional Commits.
 
+## [0.7.3](https://github.com/mohmdstag7-cmd/trade/compare/v0.7.2...v0.7.3) (2026-09-28)
+
+
+### Bug Fixes
+
+* round-2 code review — 51 findings documented, CRITICAL+HIGH+safe fixes applied ([#41](https://github.com/mohmdstag7-cmd/trade/issues/41)) ([a8c9bd9](https://github.com/mohmdstag7-cmd/trade/commit/a8c9bd9d852024eaf9575a86082eec3829016c88))
+
+
+### Documentation
+
+* **progress:** mark Phase 5.5 as merged (PR [#24](https://github.com/mohmdstag7-cmd/trade/issues/24)) ([#43](https://github.com/mohmdstag7-cmd/trade/issues/43)) ([be5b5ef](https://github.com/mohmdstag7-cmd/trade/commit/be5b5eff2dad684b66b9748f5f1b5f806363a4e8))
+
 ## [0.7.2](https://github.com/mohmdstag7-cmd/trade/compare/v0.7.1...v0.7.2) (2026-09-27)
 
 
