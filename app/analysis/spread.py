@@ -26,11 +26,26 @@ class SpreadMonitor:
     def update(self, symbol: str, hour_utc: int, spread_points: float) -> bool:
         """Record one spread sample; returns True when it looks abnormal."""
         key = (symbol, hour_utc % 24)
+        # Compute abnormal based on prior median (excluding current sample)
+        # so a spike does not raise its own median (R2-045).
+        typical_before = self.typical(symbol, hour_utc)
+        if typical_before is None or typical_before <= 0.0:
+            abnormal = False
+        else:
+            abnormal = spread_points > self.abnormal_factor * typical_before
+            if abnormal:
+                log.warning(
+                    "analysis: {} spread {} pts > {} x typical {:.0f} pts for hour {:+02d} UTC",
+                    symbol,
+                    spread_points,
+                    self.abnormal_factor,
+                    typical_before,
+                    hour_utc,
+                )
         bucket = self._history.setdefault(key, [])
         bucket.append(spread_points)
         if len(bucket) > BUCKET_SIZE:
             del bucket[0]
-        abnormal = self.is_abnormal(symbol, hour_utc, spread_points)
         self._latest_abnormal[symbol] = abnormal
         return abnormal
 

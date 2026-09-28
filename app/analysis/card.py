@@ -83,7 +83,7 @@ class CardBuilder:
         structure_events: list[structure_mod.StructureEvent] | None = None,
     ) -> AnalysisCard:
         lines: list[CardLine] = []
-        verdict = self._verdict(trend, volatility, session_name, next_event)
+        verdict = self._verdict(symbol, trend, volatility, session_name, next_event)
 
         # -- trend summary line -------------------------------------------
         h4 = trend.vector(Timeframe.H4)
@@ -167,6 +167,7 @@ class CardBuilder:
 
     def _verdict(
         self,
+        symbol: str,
         trend: TrendMatrix,
         volatility: volatility_mod.VolatilitySnapshot,
         session_name: str,
@@ -175,7 +176,7 @@ class CardBuilder:
         """Informational verdict: what the market state suggests (C3.10)."""
         if next_event is not None and next_event.impact == "high":
             return "wait"  # event risk ahead
-        if self.spread_abnormal_flag():
+        if self._spread_flag(symbol):
             return "wait"  # poor execution conditions
         bias = trend.bias_score
         if abs(bias) >= 50 and volatility.regime is not volatility_mod.Regime.LOW:

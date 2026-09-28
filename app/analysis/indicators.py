@@ -172,8 +172,6 @@ def adx(
     # Seed the ADX with VALID DX values only: the naive nan_to_num(dx, 0)
     # let the leading NaN region (DI undefined) enter as zeros and biased
     # the SMA seed badly (verified: 44.7 vs 100 on a trending series).
-    # Note: dx/DI live on the diff arrays (length n-1), matching the
-    # original contract.
     valid_dx = ~np.isnan(dx)
     m = dx.shape[0]
     adx_arr = np.full(m, np.nan)
@@ -185,7 +183,12 @@ def adx(
         adx_arr[first_valid + period - 1 : end] = writable[: end - (first_valid + period - 1)]
     # _wilder leaves NaN before the seed position — ADX now stays NaN until
     # roughly 2 * period bars, as documented.
-    return adx_arr, plus_di, minus_di
+    # Pad to length n to preserve same-length contract (R2-003).
+    pad = np.array([np.nan])
+    adx_padded = np.concatenate([pad, adx_arr])
+    plus_di_padded = np.concatenate([pad, plus_di])
+    minus_di_padded = np.concatenate([pad, minus_di])
+    return adx_padded, plus_di_padded, minus_di_padded
 
 
 def slope_pct(values: np.ndarray | list[float], lookback: int = 5) -> np.ndarray:

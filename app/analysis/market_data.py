@@ -200,16 +200,14 @@ class MarketDataManager:
 
     def mark_tick(self, symbol: str, server_epoch: int) -> SanityIssue | None:
         """Record the newest tick epoch for a symbol; detect staleness."""
-        newest: BarSeries | None = None
-        for ser in self._series.values():
-            if ser.symbol == symbol and (
-                newest is None or ser.timeframe.seconds < newest.timeframe.seconds
-            ):
-                newest = ser
-        if newest is None:
+        affected = [ser for ser in self._series.values() if ser.symbol == symbol]
+        if not affected:
             return None
+        # Smallest timeframe drives staleness detection.
+        newest = min(affected, key=lambda s: s.timeframe.seconds)
         previous = newest.last_tick_epoch
-        newest.last_tick_epoch = server_epoch
+        for ser in affected:
+            ser.last_tick_epoch = server_epoch
         if previous and server_epoch <= previous:
             return None  # equal/backwards duplicate — ignore
         tf_seconds = newest.timeframe.seconds

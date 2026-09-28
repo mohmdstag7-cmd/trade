@@ -154,7 +154,7 @@ class MarketAnalysisService:
     ) -> None:
         self._gateway = gateway
         self._watched = watched
-        self.manager = MarketDataManager(clock=clock or BrokerClock(utc_now_fn=_zero))
+        self.manager = MarketDataManager(clock=clock or BrokerClock(utc_now_fn=time.time))
         self.clock = self.manager.clock
         self.spread_monitor = SpreadMonitor()
         self.sessions = SessionClock(DEFAULT_SESSIONS)
@@ -529,11 +529,7 @@ class MarketAnalysisService:
             *round_numbers(h1_closes[-1]),
         ]
 
-        d1_highs = [b.high for b in d1]
-        d1_lows = [b.low for b in d1]
-        d1_closes = [b.close for b in d1]
-        atr_d1 = atr_fn(d1_highs, d1_lows, d1_closes, period=14)
-        vol = volatility_mod.volatility_snapshot(h1, d1, list(atr_d1))
+        vol = volatility_mod.volatility_snapshot(h1, d1, list(atr_h1))
 
         now_server = m15[-1].time
         session_name = self.sessions.state(now_server).current

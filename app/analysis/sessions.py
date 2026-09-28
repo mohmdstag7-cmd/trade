@@ -92,11 +92,9 @@ class SessionClock:
         window = self._windows.get(session)
         if window is None:
             return None
-        start_hour = window[0]
+        start_hour = window[0] % 24
         dt = datetime.fromtimestamp(server_epoch, tz=UTC)
-        candidate = dt.replace(hour=start_hour % 24, minute=0, second=0, microsecond=0)
-        if start_hour >= 24 or (candidate.timestamp() > server_epoch and dt.hour < start_hour):
-            candidate -= timedelta(days=1)
+        candidate = dt.replace(hour=start_hour, minute=0, second=0, microsecond=0)
         if candidate.timestamp() > server_epoch:
             candidate -= timedelta(days=1)
         return int(candidate.timestamp())
