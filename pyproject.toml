@@ -31,7 +31,7 @@ dependencies = [
     "scikit-learn==1.9.1",
     "shap==0.48.0",
     "joblib==1.6.0",
-    "supabase==2.31.0",
+    "supabase==2.32.0",
     "pydantic==2.13.5",
     "pydantic-settings==2.15.0",
     "keyring==25.7.0",
